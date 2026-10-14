@@ -22,6 +22,7 @@ import (
 var Tables = []string{
 	"events", "event_json", "rooms", "rejections", "event_auth",
 	"event_to_state_groups", "state_groups_state", "state_group_edges", "event_edges",
+	"event_auth_chains", "event_auth_chain_links", "server_signature_keys", "redactions",
 }
 
 // Store reads PDUs and state.
@@ -59,13 +60,15 @@ type StoredEvent struct {
 	*pdu.Event
 	Outlier        bool
 	StreamOrdering int64
+	ReceivedTS     int64
 	// Reason is the rejection reason, empty when accepted.
 	Reason string
 }
 
 const qEvents = `
 	SELECT e.event_id, ej.json, r.room_version,
-	       COALESCE(e.rejection_reason, rej.reason), e.outlier, e.stream_ordering
+	       COALESCE(e.rejection_reason, rej.reason), e.outlier, e.stream_ordering,
+	       COALESCE(e.received_ts, 0)
 	FROM events e
 	JOIN event_json ej USING (event_id)
 	JOIN rooms r ON r.room_id = e.room_id
@@ -96,7 +99,7 @@ func (s *Store) GetStoredEvents(ctx context.Context, ids []string) (map[string]*
 			reason   *string
 			se       StoredEvent
 		)
-		if err := rows.Scan(&id, &raw, &rvID, &reason, &se.Outlier, &se.StreamOrdering); err != nil {
+		if err := rows.Scan(&id, &raw, &rvID, &reason, &se.Outlier, &se.StreamOrdering, &se.ReceivedTS); err != nil {
 			return nil, nil, fmt.Errorf("pdustore: scan event: %w", err)
 		}
 		rv, ok := pdu.LookupRoomVersion(rvID)
@@ -267,4 +270,53 @@ func (s *Store) SampleEvents(ctx context.Context, roomVersion string, n int, win
 		out = append(out, id)
 	}
 	return out, rows.Err()
+}
+
+const qVerifyKeys = `
+	SELECT key_id, verify_key, ts_valid_until_ms, ts_added_ms
+	FROM server_signature_keys
+	WHERE server_name = $1 AND key_id = ANY($2)`
+
+// VerifyKeys returns the keys Synapse holds for a server, by key ID. An old
+// key is valid until the time it expired. When several notaries vouched for
+// the same key, the longest validity wins.
+func (s *Store) VerifyKeys(ctx context.Context, server string, keyIDs []string) (map[string]pdu.VerifyKey, error) {
+	rows, err := s.pool.Query(ctx, qVerifyKeys, server, keyIDs)
+	if err != nil {
+		return nil, fmt.Errorf("pdustore: verify keys: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]pdu.VerifyKey{}
+	for rows.Next() {
+		var kid string
+		var key []byte
+		var until, added *int64
+		if err := rows.Scan(&kid, &key, &until, &added); err != nil {
+			return nil, err
+		}
+		if len(key) != 32 {
+			continue
+		}
+		v := pdu.VerifyKey{Key: key}
+		if until != nil {
+			v.ValidUntilMS = *until
+		}
+		if added != nil {
+			v.AddedMS = *added
+		}
+		if cur, ok := out[kid]; !ok || v.ValidUntilMS > cur.ValidUntilMS {
+			out[kid] = v
+		}
+	}
+	return out, rows.Err()
+}
+
+const qRedacted = `SELECT EXISTS (SELECT 1 FROM redactions WHERE redacts = $1)`
+
+// IsRedacted reports whether a redaction of the event exists, in which case
+// Synapse may have replaced its stored JSON with the redacted form.
+func (s *Store) IsRedacted(ctx context.Context, id string) (bool, error) {
+	var r bool
+	err := s.pool.QueryRow(ctx, qRedacted, id).Scan(&r)
+	return r, err
 }

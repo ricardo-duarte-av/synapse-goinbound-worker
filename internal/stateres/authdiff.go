@@ -1,8 +1,43 @@
 package stateres
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"sort"
+
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pdu"
 )
+
+// ChainCover computes the auth chain difference through Synapse's chain cover
+// index, as Synapse does. A store providing it is used in preference to
+// walking the DAG, which is exact but reads every event in the room's auth
+// graph.
+type ChainCover interface {
+	AuthChainDifference(ctx context.Context, stateSets []map[string]bool, conflicted map[string]bool) (diff, subgraph map[string]bool, err error)
+}
+
+// ErrNoChainCover is an event missing from the chain cover index.
+var ErrNoChainCover = errors.New("stateres: event missing from the chain cover index")
+
+// ErrCrossCheck is a chain cover answer that the DAG walk disagrees with.
+var ErrCrossCheck = errors.New("stateres: chain cover and DAG walk disagree")
+
+func symmetricDiff(a, b map[string]bool) []string {
+	var out []string
+	for k := range a {
+		if !b[k] {
+			out = append(out, "+"+k)
+		}
+	}
+	for k := range b {
+		if !a[k] {
+			out = append(out, "-"+k)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
 
 // authChainDifference is _get_auth_chain_difference (v2.py:446) for events
 // that are all persisted, computed by walking the auth DAG rather than through
@@ -20,6 +55,55 @@ import (
 //     conflicted events themselves (the chain cover version takes the
 //     intersection of backwards- and forwards-reachable positions).
 func (r *resolver) authChainDifference(stateSets []pdu.StateMap, conflicted map[string]bool) (map[string]bool, error) {
+	cc, ok := r.store.(ChainCover)
+	if !ok || r.opts.WalkDAG {
+		return r.walkedDifference(stateSets, conflicted)
+	}
+	sets := make([]map[string]bool, len(stateSets))
+	for i, s := range stateSets {
+		sets[i] = map[string]bool{}
+		for _, id := range s {
+			sets[i][id] = true
+		}
+	}
+	var conf map[string]bool
+	if r.rv.StateRes == pdu.StateResV21 {
+		conf = conflicted
+	}
+	diff, sub, err := cc.AuthChainDifference(r.ctx, sets, conf)
+	if errors.Is(err, ErrNoChainCover) {
+		r.trace("chain cover incomplete (%v); walking the DAG", err)
+		return r.walkedDifference(stateSets, conflicted)
+	}
+	if err != nil {
+		return nil, err
+	}
+	for id := range sub {
+		diff[id] = true
+	}
+	// conflicted_subgraph includes the conflicted events; they are added to
+	// the full conflicted set by the caller either way.
+
+	if r.opts.CrossCheck {
+		walked, err := r.walkedDifference(stateSets, conflicted)
+		if err != nil {
+			return nil, err
+		}
+		// Both sides get the conflicted events: the caller adds them to the
+		// full conflicted set regardless, and the chain cover omits one
+		// whose chain has no links.
+		for id := range conflicted {
+			diff[id], walked[id] = true, true
+		}
+		if d := symmetricDiff(diff, walked); len(d) > 0 {
+			return nil, fmt.Errorf("%w: %d events differ, e.g. %v", ErrCrossCheck, len(d), d[:min(5, len(d))])
+		}
+	}
+	return diff, nil
+}
+
+// walkedDifference computes the difference by walking the auth DAG.
+func (r *resolver) walkedDifference(stateSets []pdu.StateMap, conflicted map[string]bool) (map[string]bool, error) {
 	closures := make([]map[string]bool, len(stateSets))
 	for i, s := range stateSets {
 		var start []string

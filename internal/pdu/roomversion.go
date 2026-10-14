@@ -27,6 +27,7 @@ type RoomVersion struct {
 	ID                            string
 	EventFormat                   int
 	StateRes                      int
+	EnforceKeyValidity            bool
 	SpecialCaseAliasesAuth        bool
 	StrictCanonicalJSON           bool
 	LimitNotificationsPowerLevels bool
@@ -53,8 +54,8 @@ var roomVersions = func() map[string]*RoomVersion {
 	v3.ID, v3.EventFormat = "3", FormatV3
 	v4 := v3
 	v4.ID, v4.EventFormat = "4", FormatV4Plus
-	v5 := v4 // enforce_key_validity, which auth does not use
-	v5.ID = "5"
+	v5 := v4
+	v5.ID, v5.EnforceKeyValidity = "5", true
 	v6 := v5
 	v6.ID, v6.SpecialCaseAliasesAuth, v6.StrictCanonicalJSON, v6.LimitNotificationsPowerLevels = "6", false, true, true
 	v7 := v6

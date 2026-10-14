@@ -47,15 +47,32 @@ func Resolve(ctx context.Context, roomID string, rv *pdu.RoomVersion, stateSets 
 	return ResolveTraced(ctx, roomID, rv, stateSets, store, nil)
 }
 
+// Options tunes a resolution.
+type Options struct {
+	// Trace receives each decision, for debugging a mismatch.
+	Trace Tracer
+	// WalkDAG computes the auth chain difference by walking the DAG even
+	// when the store has a chain cover index.
+	WalkDAG bool
+	// CrossCheck computes it both ways and fails on any disagreement.
+	CrossCheck bool
+}
+
 // ResolveTraced is Resolve, reporting each decision to trace.
 func ResolveTraced(ctx context.Context, roomID string, rv *pdu.RoomVersion, stateSets []pdu.StateMap, store Store, trace Tracer) (pdu.StateMap, error) {
+	return ResolveWith(ctx, roomID, rv, stateSets, store, Options{Trace: trace})
+}
+
+// ResolveWith is Resolve with options.
+func ResolveWith(ctx context.Context, roomID string, rv *pdu.RoomVersion, stateSets []pdu.StateMap, store Store, opts Options) (pdu.StateMap, error) {
+	trace := opts.Trace
 	if rv.StateRes != pdu.StateResV2 && rv.StateRes != pdu.StateResV21 {
 		return nil, ErrUnsupported
 	}
 	if trace == nil {
 		trace = func(string, ...any) {}
 	}
-	r := &resolver{ctx: ctx, roomID: roomID, rv: rv, store: store, events: map[string]*pdu.Event{}, trace: trace}
+	r := &resolver{ctx: ctx, roomID: roomID, rv: rv, store: store, events: map[string]*pdu.Event{}, trace: trace, opts: opts}
 
 	unconflicted, conflicted := separate(stateSets)
 	if len(conflicted) == 0 {
@@ -147,6 +164,7 @@ type resolver struct {
 	// edges caches auth edges for the auth chain walks.
 	edges map[string][]string
 	trace Tracer
+	opts  Options
 }
 
 func (r *resolver) load(ids []string) error {

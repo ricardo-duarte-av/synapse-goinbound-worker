@@ -46,6 +46,10 @@ func main() {
 	workers := flag.Int("workers", 4, "events replayed concurrently")
 	out := flag.String("out", "", "write one JSON line per mismatch or error to this file")
 	event := flag.String("event", "", "replay this one event and print everything, with a state resolution trace")
+	walk := flag.Bool("walk", false, "compute auth chain differences by walking the DAG instead of the chain cover index")
+	cross := flag.Bool("crosscheck", false, "compute auth chain differences both ways and report any disagreement as an error")
+	idsFile := flag.String("ids", "", "replay the event IDs in this file (one per line) instead of sampling")
+	sigs := flag.Bool("sigs", false, "check event IDs, content hashes and signatures instead of auth and state")
 	flag.Parse()
 
 	ctx := context.Background()
@@ -55,10 +59,10 @@ func main() {
 		os.Exit(1)
 	}
 	defer st.Close()
-	sw := &sweeper{st: st, groups: newGroupCache(2000)}
+	sw := &sweeper{st: st, groups: newGroupCache(2000), opts: stateres.Options{WalkDAG: *walk, CrossCheck: *cross}, sigs: *sigs}
 
 	if *event != "" {
-		sw.trace = func(format string, args ...any) { fmt.Printf(format+"\n", args...) }
+		sw.opts.Trace = func(format string, args ...any) { fmt.Printf(format+"\n", args...) }
 		res := sw.replay(ctx, *event)
 		b, _ := json.MarshalIndent(res, "", "  ")
 		fmt.Println(string(b))
@@ -74,6 +78,26 @@ func main() {
 		}
 		defer f.Close()
 		sink = json.NewEncoder(f)
+	}
+
+	if *idsFile != "" {
+		b, err := os.ReadFile(*idsFile)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		ids := strings.Fields(string(b))
+		start := time.Now()
+		results := sw.replayAll(ctx, ids, *workers)
+		report("ids", results, time.Since(start))
+		if sink != nil {
+			for _, r := range results {
+				if r.Outcome != outcomeMatch && r.Outcome != outcomeSkipped {
+					_ = sink.Encode(r)
+				}
+			}
+		}
+		return
 	}
 
 	for _, v := range strings.Split(*versions, ",") {
@@ -125,7 +149,8 @@ type result struct {
 type sweeper struct {
 	st     *pdustore.Store
 	groups *groupCache
-	trace  stateres.Tracer
+	opts   stateres.Options
+	sigs   bool
 }
 
 func (s *sweeper) replayAll(ctx context.Context, ids []string, workers int) []*result {
@@ -150,6 +175,9 @@ func (s *sweeper) replayAll(ctx context.Context, ids []string, workers int) []*r
 }
 
 func (s *sweeper) replay(ctx context.Context, id string) *result {
+	if s.sigs {
+		return s.checkSigs(ctx, id)
+	}
 	res := &result{EventID: id}
 	got, bad, err := s.st.GetStoredEvents(ctx, []string{id})
 	if err != nil {
@@ -221,7 +249,7 @@ func (s *sweeper) replay(ctx context.Context, id string) *result {
 	} else {
 		res.Resolved = true
 		start := time.Now()
-		before, err = stateres.ResolveTraced(ctx, ev.RoomID, ev.Room, sets, s.st, s.trace)
+		before, err = stateres.ResolveWith(ctx, ev.RoomID, ev.Room, sets, s.st, s.opts)
 		res.ResolveMS = time.Since(start).Milliseconds()
 		if errors.Is(err, stateres.ErrUnsupported) {
 			return res.fail(outcomeSkipped, "state resolution v1")
@@ -429,10 +457,12 @@ func report(version string, results []*result, took time.Duration) {
 	counts := map[string]int{}
 	reasons := map[string]int{}
 	resolved, authMis, stateMis := 0, 0, 0
+	var resolveMS []int64
 	for _, r := range results {
 		counts[r.Outcome]++
 		if r.Resolved {
 			resolved++
+			resolveMS = append(resolveMS, r.ResolveMS)
 		}
 		if r.Outcome == outcomeMismatch {
 			if r.AuthMismatch {
@@ -449,6 +479,15 @@ func report(version string, results []*result, took time.Duration) {
 	fmt.Printf("v%-3s n=%-4d match=%-4d mismatch=%-3d (auth %d, state %d) raise=%-3d error=%-3d skipped=%-4d resolved=%-4d %s\n",
 		version, len(results), counts[outcomeMatch], counts[outcomeMismatch], authMis, stateMis,
 		counts[outcomeRaise], counts[outcomeError], counts[outcomeSkipped], resolved, took.Round(time.Millisecond))
+	if len(resolveMS) > 0 {
+		sort.Slice(resolveMS, func(i, j int) bool { return resolveMS[i] < resolveMS[j] })
+		var sum int64
+		for _, ms := range resolveMS {
+			sum += ms
+		}
+		fmt.Printf("      state resolution ms: median %d, p90 %d, max %d, total %d\n",
+			resolveMS[len(resolveMS)/2], resolveMS[len(resolveMS)*9/10], resolveMS[len(resolveMS)-1], sum)
+	}
 	var rs []string
 	for k := range reasons {
 		rs = append(rs, k)
@@ -498,4 +537,90 @@ func (c *groupCache) get(ctx context.Context, st *pdustore.Store, g int64) (pdu.
 	c.data[g] = m
 	c.mu.Unlock()
 	return m, nil
+}
+
+// checkSigs recomputes what Synapse checked when the event arrived: its event
+// ID (v3 and later), its content hash, and its signatures, against the keys
+// Synapse holds. Every persisted event passed the signature check, rejected
+// ones included, so any failure here is ours.
+func (s *sweeper) checkSigs(ctx context.Context, id string) *result {
+	res := &result{EventID: id}
+	got, bad, err := s.st.GetStoredEvents(ctx, []string{id})
+	if err != nil {
+		return res.fail(outcomeError, err.Error())
+	}
+	if e := bad[id]; e != nil {
+		return res.fail(outcomeSkipped, "unparseable: "+e.Error())
+	}
+	se := got[id]
+	if se == nil {
+		return res.fail(outcomeSkipped, "not found")
+	}
+	ev := se.Event
+	res.RoomID, res.Type, res.Version = ev.RoomID, ev.Type, ev.Room.ID
+
+	if ev.Room.EventFormat != pdu.FormatV1V2 {
+		calc, err := pdu.CalculateEventID(ev.JSON, ev.Room)
+		if err != nil {
+			return res.fail(outcomeError, "event id: "+err.Error())
+		}
+		if calc != id {
+			res.Outcome, res.Reason = outcomeMismatch, "event id: computed "+calc
+			return res
+		}
+	}
+
+	ok, err := pdu.CheckContentHash(ev.JSON)
+	if err != nil {
+		return res.fail(outcomeRaise, "content hash: "+err.Error())
+	}
+	if !ok {
+		redacted, err := s.st.IsRedacted(ctx, id)
+		if err != nil {
+			return res.fail(outcomeError, err.Error())
+		}
+		if !redacted {
+			// Synapse redacts an event whose hash fails and stores the
+			// redacted form, which can no longer match its hash. So a
+			// failing event must already be in redacted form.
+			pruned, err := pdu.IsRedactedForm(ev.JSON, ev.Room)
+			if err != nil {
+				return res.fail(outcomeError, err.Error())
+			}
+			if !pruned {
+				res.Outcome, res.Reason = outcomeMismatch, "content hash does not match, and the event is not in redacted form"
+				return res
+			}
+		}
+	}
+
+	lookup := func(server string, keyIDs []string) (map[string]pdu.VerifyKey, error) {
+		return s.st.VerifyKeys(ctx, server, keyIDs)
+	}
+	if err := pdu.CheckSignatures(ev, ev.JSON, lookup); err != nil {
+		switch {
+		case errors.Is(err, pdu.ErrKeyUnknown):
+			return res.fail(outcomeSkipped, "signing key not held")
+		case isSignatureError(err):
+			var sigErr *pdu.SignatureError
+			errors.As(err, &sigErr)
+			if sigErr.Key != nil && sigErr.Key.AddedMS > se.ReceivedTS {
+				// The key Synapse holds now was stored after the event
+				// arrived: the server reissued a key ID, and Synapse
+				// checked the event with the one it replaced.
+				return res.fail(outcomeSkipped, "signing key replaced since the event arrived")
+			}
+			res.Outcome, res.Reason = outcomeMismatch, err.Error()
+			return res
+		default:
+			return res.fail(outcomeRaise, "signatures: "+err.Error())
+		}
+	}
+	res.Outcome = outcomeMatch
+	return res
+}
+
+func isSignatureError(err error) bool {
+	var se *pdu.SignatureError
+	return errors.As(err, &se)
 }
