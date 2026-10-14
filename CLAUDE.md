@@ -131,6 +131,13 @@ things that are not derivable from the code.
 
 ## Traps
 
+- **Bound state caches by entries, never by group count.** A big room's
+  state is 150k entries, 31MB as a Go map. The first PDU shadow cached up
+  to 2,000 groups and copied the state per event to build "after". RSS reached
+  1.7GB, and a 180-event replay of three big rooms peaked at 4.6GB of
+  heap. Now: an LRU of 400k entries, groups rebuilt from a cached prev
+  group's delta, and the state after compared as an overlay. Peak 141MB.
+
 - **Never name a metric label `instance` (or `job`).** Prometheus owns those.
   Ours was renamed to `exported_instance` at scrape time, and every "by
   writer" panel silently grouped by the scrape target. The label is `writer`.

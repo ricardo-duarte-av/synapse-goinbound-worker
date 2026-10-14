@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pdu"
@@ -65,7 +64,7 @@ type Verifier struct {
 
 // New builds a Verifier over st.
 func New(st *pdustore.Store, opts stateres.Options) *Verifier {
-	return &Verifier{st: st, groups: newGroupCache(2000), opts: opts}
+	return &Verifier{st: st, groups: newGroupCache(DefaultStateCacheEntries), opts: opts}
 }
 
 // Replay recomputes an event's state before, auth verdict and state after,
@@ -173,17 +172,17 @@ func (s *Verifier) Replay(ctx context.Context, id string) *Result {
 	if err != nil {
 		return res.fail(OutcomeError, err.Error())
 	}
-	after := make(pdu.StateMap, len(before)+1)
-	for k, v := range before {
-		after[k] = v
-	}
+	// The state after is the state before plus the event, compared as an
+	// overlay: copying a 150k-entry map per event is what the cache saves.
+	// Synapse's own verdict decides whether the event entered its state;
+	// ours is compared separately, so one disagreement does not show up
+	// twice.
+	var own *pdu.StateKey
 	if ev.IsState() && !ev.Rejected {
-		// Synapse's own verdict decides whether the event entered its
-		// state; ours is compared separately, so one disagreement does
-		// not show up twice.
-		after[ev.Key()] = ev.ID
+		k := ev.Key()
+		own = &k
 	}
-	res.StateDiff = diff(after, stored)
+	res.StateDiff = diffAfter(before, own, ev.ID, stored)
 
 	res.AuthMismatch = rej != ev.Rejected
 	if res.AuthMismatch || len(res.StateDiff) > 0 {
@@ -330,16 +329,34 @@ func sameMultiset(a, b []string) bool {
 	return true
 }
 
-// diff lists the keys whose event differs, as "type|state_key: ours != stored".
-func diff(ours, stored pdu.StateMap) []string {
+// diffAfter lists the keys whose event differs between the state after --
+// before, with own (when set) mapped to ownID -- and the stored state, as
+// "type|state_key: ours != stored".
+func diffAfter(before pdu.StateMap, own *pdu.StateKey, ownID string, stored pdu.StateMap) []string {
 	var out []string
-	for k, v := range ours {
+	ours := func(k pdu.StateKey) (string, bool) {
+		if own != nil && k == *own {
+			return ownID, true
+		}
+		v, ok := before[k]
+		return v, ok
+	}
+	check := func(k pdu.StateKey) {
+		v, _ := ours(k)
 		if stored[k] != v {
 			out = append(out, fmt.Sprintf("%s|%s: ours=%s stored=%s", k.Type, k.StateKey, v, stored[k]))
 		}
 	}
+	for k := range before {
+		check(k)
+	}
+	if own != nil {
+		if _, ok := before[*own]; !ok {
+			check(*own)
+		}
+	}
 	for k, v := range stored {
-		if _, ok := ours[k]; !ok {
+		if _, ok := ours(k); !ok {
 			out = append(out, fmt.Sprintf("%s|%s: ours=<none> stored=%s", k.Type, k.StateKey, v))
 		}
 	}
@@ -348,37 +365,6 @@ func diff(ours, stored pdu.StateMap) []string {
 		out = append(out[:20], fmt.Sprintf("... and %d more", len(out)-20))
 	}
 	return out
-}
-
-// groupCache holds resolved state groups. A group's contents never change.
-type groupCache struct {
-	mu   sync.Mutex
-	max  int
-	data map[int64]pdu.StateMap
-}
-
-func newGroupCache(max int) *groupCache {
-	return &groupCache{max: max, data: map[int64]pdu.StateMap{}}
-}
-
-func (c *groupCache) get(ctx context.Context, st *pdustore.Store, g int64) (pdu.StateMap, error) {
-	c.mu.Lock()
-	m, ok := c.data[g]
-	c.mu.Unlock()
-	if ok {
-		return m, nil
-	}
-	m, err := st.StateForGroup(ctx, g)
-	if err != nil {
-		return nil, err
-	}
-	c.mu.Lock()
-	if len(c.data) >= c.max {
-		c.data = map[int64]pdu.StateMap{}
-	}
-	c.data[g] = m
-	c.mu.Unlock()
-	return m, nil
 }
 
 // CheckSigs recomputes what Synapse checked when the event arrived: its event

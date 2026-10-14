@@ -255,6 +255,39 @@ func (s *Store) StateForGroup(ctx context.Context, group int64) (pdu.StateMap, e
 
 const qDisableSeqscan = `SET LOCAL enable_seqscan = off`
 
+const qStateEdge = `SELECT prev_state_group FROM state_group_edges WHERE state_group = $1`
+
+const qStateDeltaRows = `SELECT type, state_key, event_id FROM state_groups_state WHERE state_group = $1`
+
+// StateDelta is one link of a group's delta chain: the group it builds on
+// (hasPrev false for a group stored in full) and its own rows, which override
+// the prev group's. Synapse keeps chains short (it stores a full group every
+// 100 deltas), and a delta is usually a single row.
+func (s *Store) StateDelta(ctx context.Context, group int64) (prev int64, hasPrev bool, delta pdu.StateMap, err error) {
+	err = s.pool.QueryRow(ctx, qStateEdge, group).Scan(&prev)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return 0, false, nil, nil
+	case err != nil:
+		return 0, false, nil, fmt.Errorf("pdustore: state edge: %w", err)
+	}
+	rows, err := s.pool.Query(ctx, qStateDeltaRows, group)
+	if err != nil {
+		return 0, false, nil, fmt.Errorf("pdustore: state delta: %w", err)
+	}
+	defer rows.Close()
+	delta = pdu.StateMap{}
+	for rows.Next() {
+		var k pdu.StateKey
+		var id string
+		if err := rows.Scan(&k.Type, &k.StateKey, &id); err != nil {
+			return 0, false, nil, fmt.Errorf("pdustore: scan delta: %w", err)
+		}
+		delta[k] = id
+	}
+	return prev, true, delta, rows.Err()
+}
+
 const qSample = `
 	SELECT e.event_id
 	FROM events e

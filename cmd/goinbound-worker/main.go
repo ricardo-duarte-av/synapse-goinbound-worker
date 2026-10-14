@@ -221,6 +221,9 @@ func buildHandler(ctx context.Context, cfg *config.Config, up *proxy.Proxy, log 
 			return nil, noop, fmt.Errorf("pdu shadow: %w", err)
 		}
 		pv := pduverify.New(pst, stateres.Options{})
+		if cfg.PDUShadow.StateCacheEntries > 0 {
+			pv.SetStateCacheEntries(cfg.PDUShadow.StateCacheEntries)
+		}
 		if pc, err := pduverify.PushConfigFor(hs); err != nil {
 			// The other checks do not need it.
 			log.Warn().Err(err).Msg("PDU shadow: push check off")

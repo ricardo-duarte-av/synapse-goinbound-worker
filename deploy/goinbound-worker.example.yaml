@@ -71,3 +71,6 @@ pdu_shadow:
   queue: 1000
   max_wait_seconds: 300   # a PDU whose prev events Synapse must fetch can take minutes
   max_conns: 4
+  # The state group cache, in state entries (~210 bytes each). A big room's
+  # state is 150k entries, so this keeps a couple of its latest groups.
+  state_cache_entries: 400000

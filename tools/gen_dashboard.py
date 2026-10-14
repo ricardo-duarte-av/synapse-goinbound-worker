@@ -143,6 +143,10 @@ ts("Time for Synapse to persist a PDU", "From receipt to the event appearing in 
 ts("PDU shadow dropped and chain link batches", "PDUs not checked because the queue was full; and how many chain link batches Synapse would need per auth difference (above 1, Synapse's own v2.1 answer depends on set order).",
    [(f'sum(increase(goinbound_pdu_shadow_dropped_total{{{G}}}{R}))', "dropped"),
     (f'histogram_quantile(0.99, sum by (le) (rate(goinbound_pdu_chain_link_batches_bucket{{{G}}}{R})))', "p99 chain link batches")], w=8)
+ts("PDU checker memory", "Resident memory, and the state group cache: its entries (~210 bytes each, bounded by pdu_shadow.state_cache_entries) and how groups were got. 'delta' is a group rebuilt from its cached prev group; 'full' a read of the whole group, 150k rows in a big room.",
+   [(f'max(process_resident_memory_bytes{{{G}}}) / 1e6', "RSS MB"),
+    (f'max(goinbound_pdu_state_cache_entries{{{G}}}) / 1000', "cache k entries"),
+    (f'sum by (how) (rate(goinbound_pdu_state_cache_loads_total{{{G}}}{R})) * 60', "loads/min {{how}}")], w=8)
 flush()
 
 # ---------------------------------------------------------------- Synapse
