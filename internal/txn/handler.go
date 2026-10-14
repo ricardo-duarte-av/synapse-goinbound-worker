@@ -45,10 +45,16 @@ type TxnStore interface {
 	GetTxnState(ctx context.Context, origin, txnID string) (store.TxnState, error)
 }
 
-// PDUSink receives transactions with PDUs that Synapse accepted, for the PDU
-// shadow. It must not block.
+// PDUSink is the PDU shadow. Prepare is called before the transaction is
+// proxied and must not block; the result is committed if Synapse answers 200.
 type PDUSink interface {
-	Submit(txnBody []byte)
+	Prepare(txnBody []byte) PDUPending
+}
+
+// PDUPending is a transaction's PDUs, prepared.
+type PDUPending interface {
+	Commit()
+	Discard()
 }
 
 // EDUs plans and executes a transaction's EDUs.
@@ -354,12 +360,22 @@ func (h *Handler) proxyRaw(w http.ResponseWriter, r *http.Request, reason string
 }
 
 func (h *Handler) proxyBody(w http.ResponseWriter, r *http.Request, body []byte, reason string, rec *txnRec) proxy.Result {
+	var pending PDUPending
+	if h.pdus != nil && hasPDUs(body) {
+		// Before Synapse sees it: the shadow snapshots each PDU's room as
+		// Synapse is about to find it.
+		pending = h.pdus.Prepare(body)
+	}
 	res := h.upstream.Forward(w, withBody(r, body), 0)
 	h.recordProxy(res, reason, rec)
-	if h.pdus != nil && res.Status == http.StatusOK && hasPDUs(body) {
-		// Synapse took the transaction; its PDUs are now on their way
-		// through its staging area, and the shadow follows them there.
-		h.pdus.Submit(body)
+	if pending != nil {
+		if res.Status == http.StatusOK {
+			// Synapse took the transaction; its PDUs are on their way
+			// through its staging area, and the shadow follows them.
+			pending.Commit()
+		} else {
+			pending.Discard()
+		}
 	}
 	return res
 }

@@ -53,7 +53,7 @@ func TestLiveOnStoredEvents(t *testing.T) {
 
 	var mu sync.Mutex
 	results := map[string][]*Result{}
-	done := make(chan struct{}, 4*len(pdus))
+	done := make(chan struct{}, 6*len(pdus))
 	live := NewLive(New(st, stateres.Options{}), st, LiveOptions{
 		MaxWait: 5 * time.Second,
 		OnResult: func(check string, r *Result) {
@@ -65,14 +65,14 @@ func TestLiveOnStoredEvents(t *testing.T) {
 	}, zerolog.Nop())
 	defer live.Close()
 
-	live.Submit(body)
-	// Two checks (signatures, state_auth) per persisted PDU.
+	live.Prepare(body).Commit()
+	// Three checks (signatures, state_auth, soft_fail) per persisted PDU.
 	deadline := time.After(2 * time.Minute)
-	for n := 0; n < 2*len(pdus); n++ {
+	for n := 0; n < 3*len(pdus); n++ {
 		select {
 		case <-done:
 		case <-deadline:
-			t.Fatalf("only %d of %d results arrived", n, 2*len(pdus))
+			t.Fatalf("only %d of %d results arrived", n, 3*len(pdus))
 		}
 	}
 
@@ -81,7 +81,9 @@ func TestLiveOnStoredEvents(t *testing.T) {
 	if r := results["received"]; len(r) > 0 {
 		t.Errorf("%d PDUs did not get past receipt, e.g. %+v", len(r), r[0])
 	}
-	for _, check := range []string{"signatures", "state_auth"} {
+	// soft_fail is skipped throughout here: these events were persisted
+	// before the snapshot.
+	for _, check := range []string{"signatures", "state_auth", "soft_fail"} {
 		counts := map[string]int{}
 		for _, r := range results[check] {
 			counts[r.Outcome]++

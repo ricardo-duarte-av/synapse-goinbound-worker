@@ -23,7 +23,7 @@ type Live struct {
 	v       *Verifier
 	st      *pdustore.Store
 	log     zerolog.Logger
-	queue   chan job
+	queue   chan *job
 	maxWait time.Duration
 	onRes   func(string, *Result)
 	wg      sync.WaitGroup
@@ -34,6 +34,15 @@ type Live struct {
 type job struct {
 	raw      []byte
 	received time.Time
+
+	// Set by prepare, before snapDone closes.
+	snapDone chan struct{}
+	roomID   string
+	rv       *pdu.RoomVersion
+	eventID  string
+	snap     *pdustore.Snapshot
+	skip     string // a reason not to check, if any
+	fail     string // an error preparing, if any
 }
 
 // LiveOptions tunes the shadow.
@@ -62,7 +71,7 @@ func NewLive(v *Verifier, st *pdustore.Store, o LiveOptions, log zerolog.Logger)
 		o.MaxWait = 5 * time.Minute
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	l := &Live{v: v, st: st, log: log, queue: make(chan job, o.Queue), maxWait: o.MaxWait, onRes: o.OnResult, ctx: ctx, cancel: cancel}
+	l := &Live{v: v, st: st, log: log, queue: make(chan *job, o.Queue), maxWait: o.MaxWait, onRes: o.OnResult, ctx: ctx, cancel: cancel}
 	for i := 0; i < o.Concurrency; i++ {
 		l.wg.Add(1)
 		go l.work()
@@ -77,21 +86,104 @@ func (l *Live) Close() {
 	l.wg.Wait()
 }
 
-// Submit queues a transaction's PDUs. It never blocks.
-func (l *Live) Submit(txnBody []byte) {
+// Pending is a transaction's PDUs, prepared before Synapse sees them.
+type Pending struct {
+	l    *Live
+	jobs []*job
+}
+
+// Prepare identifies each PDU of a transaction and starts a snapshot of its
+// room, before the transaction is handed to Synapse: the soft-fail check needs
+// the room as Synapse found it, and Synapse starts processing as soon as it
+// has the transaction. Commit once Synapse has accepted it, or Discard.
+func (l *Live) Prepare(txnBody []byte) *Pending {
+	p := &Pending{l: l}
 	pdus := gjson.GetBytes(txnBody, "pdus")
 	if !pdus.IsArray() {
-		return
+		return p
 	}
 	now := time.Now()
-	pdus.ForEach(func(_, p gjson.Result) bool {
+	pdus.ForEach(func(_, raw gjson.Result) bool {
+		if len(l.queue)+len(p.jobs) >= cap(l.queue) {
+			liveDropped.Inc()
+			return true
+		}
+		j := &job{raw: []byte(raw.Raw), received: now, snapDone: make(chan struct{})}
+		p.jobs = append(p.jobs, j)
+		go l.prepare(j)
+		return true
+	})
+	return p
+}
+
+// Commit queues the PDUs for checking. It never blocks.
+func (p *Pending) Commit() {
+	for _, j := range p.jobs {
 		select {
-		case l.queue <- job{raw: []byte(p.Raw), received: now}:
+		case p.l.queue <- j:
 		default:
 			liveDropped.Inc()
 		}
-		return true
-	})
+	}
+}
+
+// Discard abandons the PDUs: Synapse did not accept the transaction.
+func (p *Pending) Discard() {}
+
+// prepare works out the PDU's room version and event ID and snapshots its
+// room. Failures are recorded on the job and reported when it is checked.
+func (l *Live) prepare(j *job) {
+	defer close(j.snapDone)
+	ctx, cancel := context.WithTimeout(l.ctx, 30*time.Second)
+	defer cancel()
+
+	roomID := gjson.GetBytes(j.raw, "room_id")
+	if roomID.Type != gjson.String {
+		j.skip = "no room_id"
+		return
+	}
+	j.roomID = roomID.Str
+	rvID, err := l.st.RoomVersion(ctx, roomID.Str)
+	if errors.Is(err, pdustore.ErrUnknownRoom) {
+		// Synapse ignores PDUs for rooms it does not know
+		// (federation_server.py:478); so do we.
+		j.skip = "unknown room"
+		return
+	}
+	if err != nil {
+		j.fail = "room version lookup"
+		return
+	}
+	rv, ok := pdu.LookupRoomVersion(rvID)
+	if !ok {
+		j.skip = "unsupported room version"
+		return
+	}
+	j.rv = rv
+
+	if rv.EventFormat == pdu.FormatV1V2 {
+		j.eventID = gjson.GetBytes(j.raw, "event_id").Str
+	} else if j.eventID, err = pdu.CalculateEventID(j.raw, rv); err != nil {
+		j.skip = "event id not computable"
+		return
+	}
+	if j.eventID == "" {
+		j.skip = "no event id"
+		return
+	}
+
+	ev, err := pdu.ParseEvent(j.raw, j.eventID, rv, false)
+	if err != nil {
+		return // reported by the checks, which parse the stored copy
+	}
+	types, err := pdu.AuthTypesForEvent(rv, ev)
+	if err != nil {
+		return
+	}
+	snap, err := l.st.TakeSnapshot(ctx, j.roomID, j.eventID, ev.PrevEvents, types)
+	if err == nil {
+		j.snap = snap
+	}
 }
 
 func (l *Live) work() {
@@ -105,43 +197,23 @@ func (l *Live) work() {
 }
 
 // check handles one PDU.
-func (l *Live) check(j job) {
+func (l *Live) check(j *job) {
 	ctx := l.ctx
-
-	roomID := gjson.GetBytes(j.raw, "room_id")
-	if roomID.Type != gjson.String {
-		l.record("received", OutcomeSkipped, "no room_id")
+	select {
+	case <-j.snapDone:
+	case <-ctx.Done():
 		return
 	}
-	rvID, err := l.st.RoomVersion(ctx, roomID.Str)
-	if errors.Is(err, pdustore.ErrUnknownRoom) {
-		// Synapse ignores PDUs for rooms it does not know
-		// (federation_server.py:478); so do we.
-		l.record("received", OutcomeSkipped, "unknown room")
+	switch {
+	case j.skip != "":
+		l.record("received", OutcomeSkipped, j.skip)
+		return
+	case j.fail != "":
+		l.record("received", OutcomeError, j.fail)
 		return
 	}
-	if err != nil {
-		l.record("received", OutcomeError, "room version lookup")
-		return
-	}
-	rv, ok := pdu.LookupRoomVersion(rvID)
-	if !ok {
-		l.record("received", OutcomeSkipped, "unsupported room version")
-		return
-	}
-
-	var eventID string
-	if rv.EventFormat == pdu.FormatV1V2 {
-		eventID = gjson.GetBytes(j.raw, "event_id").Str
-	} else if eventID, err = pdu.CalculateEventID(j.raw, rv); err != nil {
-		l.record("received", OutcomeSkipped, "event id not computable")
-		return
-	}
-	if eventID == "" {
-		l.record("received", OutcomeSkipped, "no event id")
-		return
-	}
-	log := l.log.With().Str("event_id", eventID).Str("room_id", roomID.Str).Logger()
+	eventID, rv := j.eventID, j.rv
+	log := l.log.With().Str("event_id", eventID).Str("room_id", j.roomID).Logger()
 
 	persisted, err := l.waitPersisted(ctx, eventID, j.received)
 	if err != nil {
@@ -155,10 +227,17 @@ func (l *Live) check(j job) {
 		return
 	}
 
+	softFail := func(ctx context.Context, id string) *Result {
+		if j.snap == nil {
+			return &Result{EventID: id, Outcome: OutcomeSkipped, Reason: "no snapshot"}
+		}
+		return l.v.SoftFail(ctx, id, j.snap)
+	}
+
 	for _, c := range []struct {
 		name string
 		run  func(context.Context, string) *Result
-	}{{"signatures", l.v.CheckSigs}, {"state_auth", l.v.Replay}} {
+	}{{"signatures", l.v.CheckSigs}, {"state_auth", l.v.Replay}, {"soft_fail", softFail}} {
 		res := c.run(ctx, eventID)
 		res.EventID = eventID
 		l.recordResult(c.name, res)
@@ -243,6 +322,8 @@ func reasonLabel(outcome, reason string) string {
 		"not persisted", "bad signature, not persisted", "signatures",
 		"outlier", "create event", "prev event without state group", "a prev's state was computed after the event's",
 		"no state group for the event", "state resolution v1", "signing key not held", "signing key replaced",
+		"rejected", "partial state room", "snapshot taken after the event", "backfilled", "missing prevs", "race",
+		"no snapshot", "soft fail",
 		"unparseable", "event id", "content hash", "state resolution", "auth",
 	} {
 		if strings.HasPrefix(reason, known) {
@@ -266,7 +347,7 @@ func (l *Live) recordResult(check string, r *Result) {
 var (
 	liveChecks = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "goinbound_pdu_shadow_total",
-		Help: "PDU shadow checks by check (received, signatures, state_auth), outcome and reason.",
+		Help: "PDU shadow checks by check (received, signatures, state_auth, soft_fail), outcome and reason.",
 	}, []string{"check", "outcome", "reason"})
 	liveDropped = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "goinbound_pdu_shadow_dropped_total",

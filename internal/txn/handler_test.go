@@ -513,15 +513,30 @@ func TestDebugLogsEachTransaction(t *testing.T) {
 }
 
 type pduSink struct {
-	mu     sync.Mutex
-	bodies []string
+	mu       sync.Mutex
+	bodies   []string
+	prepared int
 }
 
-func (p *pduSink) Submit(b []byte) {
+type pduPending struct {
+	s    *pduSink
+	body string
+}
+
+func (p *pduSink) Prepare(b []byte) PDUPending {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.bodies = append(p.bodies, string(b))
+	p.prepared++
+	return &pduPending{s: p, body: string(b)}
 }
+
+func (p *pduPending) Commit() {
+	p.s.mu.Lock()
+	defer p.s.mu.Unlock()
+	p.s.bodies = append(p.s.bodies, p.body)
+}
+
+func (p *pduPending) Discard() {}
 
 // modes.pdu: shadow hands every PDU transaction Synapse accepted to the PDU
 // shadow -- and nothing else, and not when Synapse refused it.
@@ -539,6 +554,9 @@ func TestPDUShadowGetsAcceptedPDUTransactions(t *testing.T) {
 
 			if len(sink.bodies) != 1 || sink.bodies[0] != withPDU {
 				t.Errorf("shadow got %d bodies %v; want only the accepted PDU transaction", len(sink.bodies), sink.bodies)
+			}
+			if sink.prepared != 2 {
+				t.Errorf("prepared %d transactions; want both PDU ones, before Synapse answered", sink.prepared)
 			}
 			if r.up.count() < 2 {
 				t.Errorf("PDU transactions did not reach Synapse")

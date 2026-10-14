@@ -241,7 +241,7 @@ func buildHandler(ctx context.Context, cfg *config.Config, up *proxy.Proxy, log 
 		Log:             log,
 	}
 	if live != nil {
-		opts.PDUs = live
+		opts.PDUs = pduSink{live}
 	}
 	h := txn.NewHandler(opts)
 	return h, func() {
@@ -326,6 +326,11 @@ func openDatabase(ctx context.Context, cfg *config.Config, hs *synapsecfg.Config
 	log.Info().Str("role", role).Msg("Created or repaired the read-only role, and connected as it")
 	return db, storeCfg, nil
 }
+
+// pduSink adapts the PDU shadow to txn.PDUSink.
+type pduSink struct{ l *pduverify.Live }
+
+func (p pduSink) Prepare(body []byte) txn.PDUPending { return p.l.Prepare(body) }
 
 // roleTables is every table the read-only role is granted: those the EDU path
 // reads (package store) and those the PDU checker reads (package pdustore).

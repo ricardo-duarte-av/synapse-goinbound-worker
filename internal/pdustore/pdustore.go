@@ -9,6 +9,7 @@ package pdustore
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -23,6 +24,7 @@ var Tables = []string{
 	"events", "event_json", "rooms", "rejections", "event_auth",
 	"event_to_state_groups", "state_groups_state", "state_group_edges", "event_edges",
 	"event_auth_chains", "event_auth_chain_links", "server_signature_keys", "redactions",
+	"event_forward_extremities", "current_state_events", "partial_state_rooms",
 }
 
 // Store reads PDUs and state.
@@ -360,4 +362,139 @@ func (s *Store) EventExists(ctx context.Context, id string) (bool, error) {
 		return false, fmt.Errorf("pdustore: event exists: %w", err)
 	}
 	return ok, nil
+}
+
+// Snapshot is what Synapse's soft-fail check reads about a room
+// (federation_event.py _check_for_soft_fail), captured as close as possible
+// to the moment Synapse reads it.
+type Snapshot struct {
+	Extremities []string
+	// Current is the current state for the requested keys.
+	Current pdu.StateMap
+	// PrevsInTimeline is have_events_in_timeline: every prev event is held,
+	// and not as an outlier.
+	PrevsInTimeline bool
+	// MaxStream is the room's newest stream ordering when taken.
+	MaxStream int64
+	// EventPresent means the event was already persisted when the snapshot
+	// was taken, so it describes the room after the event, not before.
+	EventPresent bool
+	PartialState bool
+}
+
+const qExtremities = `SELECT event_id FROM event_forward_extremities WHERE room_id = $1`
+
+const qCurrentState = `
+	SELECT c.type, c.state_key, c.event_id
+	FROM current_state_events c
+	JOIN unnest($2::text[], $3::text[]) AS k(type, state_key)
+	  ON c.type = k.type AND c.state_key = k.state_key
+	WHERE c.room_id = $1`
+
+const qPrevsInTimeline = `
+	SELECT count(*) FROM events WHERE event_id = ANY($1) AND NOT outlier`
+
+const qRoomMaxStream = `SELECT COALESCE(max(stream_ordering), 0) FROM events WHERE room_id = $1`
+
+const qPartialState = `SELECT EXISTS (SELECT 1 FROM partial_state_rooms WHERE room_id = $1)`
+
+// TakeSnapshot reads the room as the soft-fail check would see it.
+func (s *Store) TakeSnapshot(ctx context.Context, roomID, eventID string, prevs []string, keys []pdu.StateKey) (*Snapshot, error) {
+	snap := &Snapshot{Current: pdu.StateMap{}}
+	var err error
+	// Stream position first, and presence last: if the event is absent at
+	// the end, it was absent throughout.
+	if err = s.pool.QueryRow(ctx, qRoomMaxStream, roomID).Scan(&snap.MaxStream); err != nil {
+		return nil, fmt.Errorf("pdustore: room max stream: %w", err)
+	}
+	rows, err := s.pool.Query(ctx, qExtremities, roomID)
+	if err != nil {
+		return nil, fmt.Errorf("pdustore: extremities: %w", err)
+	}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		snap.Extremities = append(snap.Extremities, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	types, sks := make([]string, len(keys)), make([]string, len(keys))
+	for i, k := range keys {
+		types[i], sks[i] = k.Type, k.StateKey
+	}
+	rows, err = s.pool.Query(ctx, qCurrentState, roomID, types, sks)
+	if err != nil {
+		return nil, fmt.Errorf("pdustore: current state: %w", err)
+	}
+	for rows.Next() {
+		var k pdu.StateKey
+		var id string
+		if err := rows.Scan(&k.Type, &k.StateKey, &id); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		snap.Current[k] = id
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	var n int
+	if err := s.pool.QueryRow(ctx, qPrevsInTimeline, uniqueIDs(prevs)).Scan(&n); err != nil {
+		return nil, fmt.Errorf("pdustore: prevs: %w", err)
+	}
+	snap.PrevsInTimeline = n == len(uniqueIDs(prevs))
+	if err := s.pool.QueryRow(ctx, qPartialState, roomID).Scan(&snap.PartialState); err != nil {
+		return nil, fmt.Errorf("pdustore: partial state: %w", err)
+	}
+	if snap.EventPresent, err = s.EventExists(ctx, eventID); err != nil {
+		return nil, err
+	}
+	return snap, nil
+}
+
+func uniqueIDs(ids []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, id := range ids {
+		if !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+const qRoomEventsBetween = `
+	SELECT count(*) FROM events
+	WHERE room_id = $1 AND stream_ordering > $2 AND stream_ordering < $3 AND event_id <> $4`
+
+// RoomEventsBetween counts the room's events persisted strictly between two
+// stream orderings, other than the given event.
+func (s *Store) RoomEventsBetween(ctx context.Context, roomID string, after, before int64, except string) (int, error) {
+	var n int
+	err := s.pool.QueryRow(ctx, qRoomEventsBetween, roomID, after, before, except).Scan(&n)
+	return n, err
+}
+
+const qInternalMetadata = `SELECT internal_metadata FROM event_json WHERE event_id = $1`
+
+// SoftFailed reports Synapse's soft_failed flag for an event.
+func (s *Store) SoftFailed(ctx context.Context, id string) (bool, error) {
+	var meta string
+	if err := s.pool.QueryRow(ctx, qInternalMetadata, id).Scan(&meta); err != nil {
+		return false, fmt.Errorf("pdustore: internal metadata: %w", err)
+	}
+	var m struct {
+		SoftFailed bool `json:"soft_failed"`
+	}
+	_ = json.Unmarshal([]byte(meta), &m)
+	return m.SoftFailed, nil
 }
