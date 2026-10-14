@@ -762,7 +762,7 @@
     },
     {
       "type": "timeseries",
-      "title": "EDUs forwarded, by destination instance",
+      "title": "EDUs forwarded, by destination writer",
       "description": "Forwards by stream writer. In shadow, set this beside the Synapse panel below: the counts should match what the Python worker sends.",
       "id": 13,
       "datasource": {
@@ -817,8 +817,8 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (path, instance) (rate(goinbound_edus_total{job=~\"$job\", action=\"forward\"}[$bucket]))",
-          "legendFormat": "{{path}} \u2192 {{instance}}",
+          "expr": "sum by (path, writer) (rate(goinbound_edus_total{job=~\"$job\", action=\"forward\"}[$bucket]))",
+          "legendFormat": "{{path}} \u2192 {{writer}}",
           "range": true,
           "refId": "A"
         }
@@ -881,8 +881,8 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.5, sum by (le, instance) (rate(goinbound_replication_send_edu_duration_seconds_bucket{job=~\"$job\"}[$bucket])))",
-          "legendFormat": "p50 {{instance}}",
+          "expr": "histogram_quantile(0.5, sum by (le, writer) (rate(goinbound_replication_send_edu_duration_seconds_bucket{job=~\"$job\"}[$bucket])))",
+          "legendFormat": "p50 {{writer}}",
           "range": true,
           "refId": "A"
         },
@@ -892,8 +892,8 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum by (le, instance) (rate(goinbound_replication_send_edu_duration_seconds_bucket{job=~\"$job\"}[$bucket])))",
-          "legendFormat": "p99 {{instance}}",
+          "expr": "histogram_quantile(0.99, sum by (le, writer) (rate(goinbound_replication_send_edu_duration_seconds_bucket{job=~\"$job\"}[$bucket])))",
+          "legendFormat": "p99 {{writer}}",
           "range": true,
           "refId": "B"
         }
@@ -956,8 +956,8 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (instance, edu_type, result) (rate(goinbound_replication_send_edu_duration_seconds_count{job=~\"$job\"}[$bucket]))",
-          "legendFormat": "{{instance}} {{edu_type}} {{result}}",
+          "expr": "sum by (writer, edu_type, result) (rate(goinbound_replication_send_edu_duration_seconds_count{job=~\"$job\"}[$bucket]))",
+          "legendFormat": "{{writer}} {{edu_type}} {{result}}",
           "range": true,
           "refId": "A"
         }
@@ -1020,8 +1020,8 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (instance, reason) (rate(goinbound_replication_retries_total{job=~\"$job\"}[$bucket]))",
-          "legendFormat": "retry {{instance}} {{reason}}",
+          "expr": "sum by (writer, reason) (rate(goinbound_replication_retries_total{job=~\"$job\"}[$bucket]))",
+          "legendFormat": "retry {{writer}} {{reason}}",
           "range": true,
           "refId": "A"
         },

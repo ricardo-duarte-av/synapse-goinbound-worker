@@ -257,9 +257,9 @@ var (
 		Name:    "goinbound_replication_send_edu_duration_seconds",
 		Help:    "Time to forward one EDU to its stream writer, including retries, by outcome.",
 		Buckets: []float64{.001, .0025, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 30, 60},
-	}, []string{"instance", "edu_type", "result"})
+	}, []string{"writer", "edu_type", "result"})
 	retries = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "goinbound_replication_retries_total",
 		Help: "Replication requests retried, by instance and reason.",
-	}, []string{"instance", "reason"})
+	}, []string{"writer", "reason"})
 )

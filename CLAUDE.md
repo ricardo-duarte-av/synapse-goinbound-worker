@@ -66,6 +66,10 @@ things that are not derivable from the code.
 
 ## Traps
 
+- **Never name a metric label `instance` (or `job`).** Prometheus owns those.
+  Ours was renamed to `exported_instance` at scrape time, and every "by
+  writer" panel silently grouped by the scrape target. The label is `writer`.
+
 - `TestLiveEnsure` (dbrole) does DDL on the real database: it creates and
   drops a throwaway role. The auto-mode classifier blocks it, so the operator
   runs it.
@@ -74,4 +78,4 @@ things that are not derivable from the code.
 - The 24k EDUs a day that the Python worker forwards to **main** are of an
   unknown type. Synapse logs nothing at the default level. Shadow mode logs the
   first sighting of each unknown type (`noteUnknown`), and counts them as
-  `edu_type="other", instance="master"`.
+  `edu_type="other", writer="master"`.

@@ -301,8 +301,8 @@ func Record(path string, steps []Step) {
 var (
 	edusDecided = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "goinbound_edus_total",
-		Help: "Inbound EDUs by path (native or shadow), type, action and destination instance.",
-	}, []string{"path", "edu_type", "action", "instance"})
+		Help: "Inbound EDUs by path (native or shadow), type, action and destination writer instance.",
+	}, []string{"path", "edu_type", "action", "writer"})
 	receiptRoomsRemoved = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "goinbound_receipt_rooms_removed_by_acl_total",
 		Help: "Rooms removed from receipt EDUs because the origin is banned by the room's server ACL.",

@@ -96,17 +96,17 @@ flush()
 row("EDUs")
 ts("EDUs by type and action", "Every EDU decided, natively or in shadow: forwarded, dropped as untracked presence, or dropped by a room's server ACL. edu_type=\"other\" is a type Synapse has no handler for; the log names the first of each.",
    [(f'sum by (path, edu_type, action) (rate(goinbound_edus_total{{{G}}}{R}))', "{{path}} {{edu_type}} {{action}}")], unit="ops", stack=True)
-ts("EDUs forwarded, by destination instance", "Forwards by stream writer. In shadow, set this beside the Synapse panel below: the counts should match what the Python worker sends.",
-   [(f'sum by (path, instance) (rate(goinbound_edus_total{{{G}, action="forward"}}{R}))', "{{path}} → {{instance}}")], unit="ops")
+ts("EDUs forwarded, by destination writer", "Forwards by stream writer. In shadow, set this beside the Synapse panel below: the counts should match what the Python worker sends.",
+   [(f'sum by (path, writer) (rate(goinbound_edus_total{{{G}, action="forward"}}{R}))', "{{path}} → {{writer}}")], unit="ops")
 ts("Forward latency", "One EDU handed to its writer over replication, retries included.",
-   [(f'histogram_quantile(0.5, sum by (le, instance) (rate(goinbound_replication_send_edu_duration_seconds_bucket{{{G}}}{R})))', "p50 {{instance}}"),
-    (f'histogram_quantile(0.99, sum by (le, instance) (rate(goinbound_replication_send_edu_duration_seconds_bucket{{{G}}}{R})))', "p99 {{instance}}")],
+   [(f'histogram_quantile(0.5, sum by (le, writer) (rate(goinbound_replication_send_edu_duration_seconds_bucket{{{G}}}{R})))', "p50 {{writer}}"),
+    (f'histogram_quantile(0.99, sum by (le, writer) (rate(goinbound_replication_send_edu_duration_seconds_bucket{{{G}}}{R})))', "p99 {{writer}}")],
    unit="s", w=8)
 ts("Forwards by outcome", "ok, error (a non-retryable answer) or timeout (gave up after retrying).",
-   [(f'sum by (instance, edu_type, result) (rate(goinbound_replication_send_edu_duration_seconds_count{{{G}}}{R}))', "{{instance}} {{edu_type}} {{result}}")],
+   [(f'sum by (writer, edu_type, result) (rate(goinbound_replication_send_edu_duration_seconds_count{{{G}}}{R}))', "{{writer}} {{edu_type}} {{result}}")],
    unit="ops", w=8)
 ts("Replication retries and ACL removals", "Retries of a forward (timeout or connection refused), and rooms removed from receipt EDUs by server ACL.",
-   [(f'sum by (instance, reason) (rate(goinbound_replication_retries_total{{{G}}}{R}))', "retry {{instance}} {{reason}}"),
+   [(f'sum by (writer, reason) (rate(goinbound_replication_retries_total{{{G}}}{R}))', "retry {{writer}} {{reason}}"),
     (f'sum by (path) (rate(goinbound_receipt_rooms_removed_by_acl_total{{{G}}}{R}))', "receipt rooms removed ({{path}})")],
    unit="ops", w=8)
 flush()

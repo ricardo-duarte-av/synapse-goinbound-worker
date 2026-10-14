@@ -119,7 +119,7 @@ Prometheus job: `av-goinbound-worker-1:9200`. The Grafana dashboard is in
 sum by (route, reason) (rate(goinbound_requests_total[1h]))
 
 # Shadow: what native would have done, by EDU type and destination ...
-sum by (edu_type, action, instance) (increase(goinbound_edus_total{path="shadow"}[1d]))
+sum by (edu_type, action, writer) (increase(goinbound_edus_total{path="shadow"}[1d]))
 # ... against what the Python worker actually forwarded (47k/day to av-edu-worker,
 # 24k/day to master in October 2026).
 sum by (job) (increase(synapse_http_server_requests_received_total{
@@ -129,7 +129,7 @@ sum by (job) (increase(synapse_http_server_requests_received_total{
 sum by (synapse_status) (increase(goinbound_shadow_disagreements_total[1d]))
 
 # Native: forwards, their latency and failures.
-sum by (instance, edu_type, result) (rate(goinbound_replication_send_edu_duration_seconds_count[1h]))
+sum by (writer, edu_type, result) (rate(goinbound_replication_send_edu_duration_seconds_count[1h]))
 ```
 
 Once native, the Python worker's `FederationSendServlet` rate should fall by
