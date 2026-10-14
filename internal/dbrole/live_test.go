@@ -60,7 +60,7 @@ func TestLiveEnsure(t *testing.T) {
 			t.Fatalf("%s: logging in as %s over TCP with the derived password: %v", stage, role, err)
 		}
 		defer db.Close()
-		missing, err := db.MissingPrivileges(ctx)
+		missing, err := db.MissingPrivileges(ctx, store.Tables)
 		if err != nil {
 			t.Fatal(err)
 		}

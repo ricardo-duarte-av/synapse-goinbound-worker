@@ -70,9 +70,10 @@ modes:
 | `canary:N` | Serve natively for N% of **origins**. Each origin stays on one path. |
 | `native` | Serve natively whenever possible. Anything uncertain is still forwarded. |
 
-`modes.pdu` accepts only `proxy`: there is no PDU pipeline. A transaction with
-any PDU goes to the Python worker whole, its EDUs included, whatever
-`modes.edu` says. The old single `mode:` key is refused, with a message giving
+`modes.pdu` is `proxy` or `shadow`. Either way a transaction with any PDU goes
+to the Python worker whole, its EDUs included, whatever `modes.edu` says;
+`shadow` additionally checks each PDU Synapse accepted, once Synapse has
+persisted it (see below). There is no native PDU handling. The old single `mode:` key is refused, with a message giving
 the replacement. The modes in force are exported as `goinbound_mode` and shown
 at the top of the dashboard.
 
@@ -180,11 +181,14 @@ HOMESERVER_YAML=/opt/matrix/synapse/synapse/homeserver.yaml go test -run LivePre
 and checks that a wrong secret is refused. It is a no-op only because presence
 is untracked here; the test refuses to run otherwise.
 
-## PDU checker (in progress)
+## PDU checker
 
-PDUs are always proxied (`modes.pdu: proxy`). The checker that will verify
-them is being built bottom-up. The first part is done, and it is checked
-offline against history.
+PDUs are always proxied. With `modes.pdu: shadow`, every PDU in a transaction
+Synapse answered 200 is followed into Synapse's database: once persisted, it
+gets the same checks as the offline replay -- event ID, content hash and
+signatures; state resolution, the auth verdict and the resulting state --
+compared with what Synapse stored. Counted in `goinbound_pdu_shadow_total`
+(dashboard row "PDU shadow"); disagreements are logged at warn.
 
 | Package | What it is |
 |---|---|
@@ -222,5 +226,11 @@ Not yet ported:
 - third-party invite signature checks;
 - the size limits in `validate_event_for_room_version`.
 
-Not yet built: the live checker on proxied transactions (soft-fail, push
-actions, missing-event handling).
+State resolution uses Synapse's chain cover index, cross-checked against a
+plain DAG walk (`pdusweep -crosscheck`, 308 resolutions agreeing). Signatures,
+content hashes and event IDs are checked with `pdusweep -sigs`: 9,000 stored
+events across v3-v12 all reproduce, apart from keys reissued under the same
+ID since.
+
+Not yet built: soft-fail, push actions. Missing prev events are not fetched:
+the shadow compares only what Synapse computed from state it already held.

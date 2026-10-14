@@ -32,12 +32,24 @@ type Store struct {
 
 // Open connects. The DSN's role needs SELECT on Tables.
 func Open(ctx context.Context, dsn string, maxConns int32) (*Store, error) {
+	return OpenAs(ctx, dsn, "", "", maxConns)
+}
+
+// OpenAs connects as user (replacing any the DSN names) with password (used
+// only when the DSN has none), as package store does for the managed role.
+func OpenAs(ctx context.Context, dsn, user, password string, maxConns int32) (*Store, error) {
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("pdustore: parse dsn: %w", err)
 	}
 	if maxConns > 0 {
 		cfg.MaxConns = maxConns
+	}
+	if user != "" {
+		cfg.ConnConfig.User = user
+	}
+	if cfg.ConnConfig.Password == "" && password != "" {
+		cfg.ConnConfig.Password = password
 	}
 	// See package store: pgcat in transaction mode.
 	cfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeExec
@@ -319,4 +331,33 @@ func (s *Store) IsRedacted(ctx context.Context, id string) (bool, error) {
 	var r bool
 	err := s.pool.QueryRow(ctx, qRedacted, id).Scan(&r)
 	return r, err
+}
+
+// ErrUnknownRoom is a room this homeserver does not know.
+var ErrUnknownRoom = errors.New("pdustore: unknown room")
+
+const qRoomVersion = `SELECT room_version FROM rooms WHERE room_id = $1`
+
+// RoomVersion returns the room's version.
+func (s *Store) RoomVersion(ctx context.Context, roomID string) (string, error) {
+	var v *string
+	err := s.pool.QueryRow(ctx, qRoomVersion, roomID).Scan(&v)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && v == nil) {
+		return "", ErrUnknownRoom
+	}
+	if err != nil {
+		return "", fmt.Errorf("pdustore: room version: %w", err)
+	}
+	return *v, nil
+}
+
+const qEventExists = `SELECT EXISTS (SELECT 1 FROM events WHERE event_id = $1)`
+
+// EventExists reports whether Synapse has persisted the event.
+func (s *Store) EventExists(ctx context.Context, id string) (bool, error) {
+	var ok bool
+	if err := s.pool.QueryRow(ctx, qEventExists, id).Scan(&ok); err != nil {
+		return false, fmt.Errorf("pdustore: event exists: %w", err)
+	}
+	return ok, nil
 }

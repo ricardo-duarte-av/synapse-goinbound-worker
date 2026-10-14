@@ -19,13 +19,13 @@ var Tables = []string{
 
 const qTablePrivilege = `SELECT has_table_privilege(current_user, $1, 'SELECT')`
 
-// MissingPrivileges reports what the connected role lacks: a table in Tables
-// it cannot SELECT from, or "default_transaction_read_only" when the role does
+// MissingPrivileges reports what the connected role lacks: one of tables it
+// cannot SELECT from, or "default_transaction_read_only" when the role does
 // not default to read-only transactions. Empty means the role is as it should
 // be.
-func (s *Store) MissingPrivileges(ctx context.Context) ([]string, error) {
+func (s *Store) MissingPrivileges(ctx context.Context, tables []string) ([]string, error) {
 	var missing []string
-	for _, t := range Tables {
+	for _, t := range tables {
 		var ok bool
 		if err := s.queryRow(ctx, "table_privilege", qTablePrivilege, "public."+t).Scan(&ok); err != nil {
 			return nil, fmt.Errorf("store: check privilege on %s: %w", t, err)

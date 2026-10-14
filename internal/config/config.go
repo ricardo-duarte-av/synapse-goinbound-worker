@@ -94,9 +94,10 @@ type Modes struct {
 	// EDU is how EDU-only transactions are served: proxy, shadow, canary:N
 	// or native.
 	EDU Mode `yaml:"edu"`
-	// PDU is how transactions carrying any PDU are served. Only proxy exists:
-	// this worker has no PDU pipeline, so every such transaction goes to the
-	// Python worker whole, its EDUs included.
+	// PDU is how transactions carrying any PDU are served. They always go to
+	// the Python worker whole, EDUs included: proxy does only that, shadow
+	// also checks each PDU afterwards against what Synapse decided. There
+	// is no native PDU handling.
 	PDU Mode `yaml:"pdu"`
 }
 
@@ -113,6 +114,8 @@ type Config struct {
 	Auth     Auth     `yaml:"auth"`
 	EDU      EDU      `yaml:"edu"`
 	Shadow   Shadow   `yaml:"shadow"`
+	// PDUShadow tunes modes.pdu: shadow.
+	PDUShadow PDUShadow `yaml:"pdu_shadow"`
 
 	// Modes says, per kind of payload, whether it is proxied, shadowed or
 	// served here. Both are required: what goes where is spelled out, never
@@ -277,6 +280,19 @@ type Shadow struct {
 	Queue int `yaml:"queue"`
 }
 
+// PDUShadow tunes the PDU shadow.
+type PDUShadow struct {
+	// Concurrency bounds PDUs checked at once. Zero uses 2.
+	Concurrency int `yaml:"concurrency"`
+	// Queue bounds PDUs waiting to be checked. Zero uses 1000.
+	Queue int `yaml:"queue"`
+	// MaxWaitSeconds bounds waiting for Synapse to persist a PDU. Zero
+	// uses 300.
+	MaxWaitSeconds int `yaml:"max_wait_seconds"`
+	// MaxConns bounds the PDU checker's own database pool. Zero uses 4.
+	MaxConns int `yaml:"max_conns"`
+}
+
 // Load reads and validates a config file.
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
@@ -335,6 +351,10 @@ func (c *Config) validate() error {
 		{"edu.forward_timeout_seconds", c.EDU.ForwardTimeoutSeconds},
 		{"shadow.concurrency", c.Shadow.Concurrency},
 		{"shadow.queue", c.Shadow.Queue},
+		{"pdu_shadow.concurrency", c.PDUShadow.Concurrency},
+		{"pdu_shadow.queue", c.PDUShadow.Queue},
+		{"pdu_shadow.max_wait_seconds", c.PDUShadow.MaxWaitSeconds},
+		{"pdu_shadow.max_conns", c.PDUShadow.MaxConns},
 		{"max_body_mb", c.MaxBodyMB},
 	} {
 		if n.v < 0 {
@@ -349,10 +369,10 @@ func (c *Config) validate() error {
 		return fmt.Errorf("modes.edu is required: one of proxy, shadow, canary:N, native")
 	}
 	if c.Modes.PDU.Kind == "" {
-		return fmt.Errorf("modes.pdu is required; the only mode implemented is proxy")
+		return fmt.Errorf("modes.pdu is required: proxy or shadow")
 	}
-	if c.Modes.PDU.Kind != ModeProxy {
-		return fmt.Errorf("modes.pdu is %s, but this worker has no PDU pipeline yet; the only mode implemented is proxy", c.Modes.PDU)
+	if c.Modes.PDU.Kind != ModeProxy && c.Modes.PDU.Kind != ModeShadow {
+		return fmt.Errorf("modes.pdu is %s, but PDUs are never served here; it must be proxy or shadow", c.Modes.PDU)
 	}
 	return nil
 }

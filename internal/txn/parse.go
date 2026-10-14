@@ -117,3 +117,11 @@ func isObject(b []byte) bool {
 	b = bytes.TrimSpace(b)
 	return len(b) > 0 && b[0] == '{'
 }
+
+// hasPDUs reports whether a transaction body carries any PDU.
+func hasPDUs(body []byte) bool {
+	var txn struct {
+		PDUs []json.RawMessage `json:"pdus"`
+	}
+	return json.Unmarshal(body, &txn) == nil && len(txn.PDUs) > 0
+}

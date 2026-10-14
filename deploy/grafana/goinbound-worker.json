@@ -1245,7 +1245,7 @@
     },
     {
       "type": "row",
-      "title": "Synapse, for comparison",
+      "title": "PDU shadow (modes.pdu: shadow)",
       "id": 21,
       "collapsed": false,
       "gridPos": {
@@ -1258,8 +1258,8 @@
     },
     {
       "type": "timeseries",
-      "title": "Synapse: EDUs received over replication, by writer",
-      "description": "ReplicationFederationSendEduRestServlet on each Synapse instance: every EDU forwarded to it, from the Python worker or from us. Moving to native must not change this.",
+      "title": "PDU checks by outcome",
+      "description": "Each PDU Synapse accepted, once persisted: 'signatures' (event ID, content hash, signatures) and 'state_auth' (state resolution, auth verdict, resulting state). 'received' covers PDUs that never got that far. Any mismatch is a disagreement with Synapse worth reading in the log.",
       "id": 22,
       "datasource": {
         "type": "prometheus",
@@ -1268,6 +1268,362 @@
       "gridPos": {
         "x": 0,
         "y": 44,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 40,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (check, outcome) (rate(goinbound_pdu_shadow_total{job=~\"$job\"}[$bucket]))",
+          "legendFormat": "{{check}} {{outcome}}",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Mismatches and errors by reason",
+      "description": "",
+      "id": 23,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 44,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (check, outcome, reason) (increase(goinbound_pdu_shadow_total{job=~\"$job\", outcome=~\"mismatch|error|raise\"}[$bucket]))",
+          "legendFormat": "{{check}} {{outcome}}: {{reason}}",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Skipped, by reason",
+      "description": "Events the comparison cannot be made for: outliers, prevs without state groups, prev state computed after the event's (Synapse used a remote's state), keys reissued since, room v1.",
+      "id": 24,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 52,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (check, reason) (rate(goinbound_pdu_shadow_total{job=~\"$job\", outcome=\"skipped\"}[$bucket]))",
+          "legendFormat": "{{check}}: {{reason}}",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Time for Synapse to persist a PDU",
+      "description": "From receipt to the event appearing in Synapse's database; the shadow waits for it.",
+      "id": 25,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 52,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(goinbound_pdu_shadow_persist_wait_seconds_bucket{job=~\"$job\"}[$bucket])))",
+          "legendFormat": "p50",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(goinbound_pdu_shadow_persist_wait_seconds_bucket{job=~\"$job\"}[$bucket])))",
+          "legendFormat": "p95",
+          "range": true,
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "PDU shadow dropped and chain link batches",
+      "description": "PDUs not checked because the queue was full; and how many chain link batches Synapse would need per auth difference (above 1, Synapse's own v2.1 answer depends on set order).",
+      "id": 26,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 52,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(increase(goinbound_pdu_shadow_dropped_total{job=~\"$job\"}[$bucket]))",
+          "legendFormat": "dropped",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(goinbound_pdu_chain_link_batches_bucket{job=~\"$job\"}[$bucket])))",
+          "legendFormat": "p99 chain link batches",
+          "range": true,
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Synapse, for comparison",
+      "id": 27,
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 60,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Synapse: EDUs received over replication, by writer",
+      "description": "ReplicationFederationSendEduRestServlet on each Synapse instance: every EDU forwarded to it, from the Python worker or from us. Moving to native must not change this.",
+      "id": 28,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 61,
         "w": 8,
         "h": 8
       },
@@ -1324,14 +1680,14 @@
       "type": "timeseries",
       "title": "Synapse: /send reaching the Python worker",
       "description": "FederationSendServlet on the Python inbound worker. Falls by ~96% once EDU-only transactions are native.",
-      "id": 23,
+      "id": 29,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 8,
-        "y": 44,
+        "y": 61,
         "w": 8,
         "h": 8
       },
@@ -1399,14 +1755,14 @@
       "type": "timeseries",
       "title": "Synapse: inbound EDUs and PDUs at the Python worker",
       "description": "What the Python worker still parses.",
-      "id": 24,
+      "id": 30,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 16,
-        "y": 44,
+        "y": 61,
         "w": 8,
         "h": 8
       },
@@ -1473,11 +1829,11 @@
     {
       "type": "row",
       "title": "Database",
-      "id": 25,
+      "id": 31,
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 52,
+        "y": 69,
         "w": 24,
         "h": 1
       },
@@ -1487,14 +1843,14 @@
       "type": "timeseries",
       "title": "Queries by name and result",
       "description": "Every query is a primary-key lookup: txn_state once per native transaction, current_server_acl for typing and receipts (cached 5s per room), server_keys on a key-cache miss.",
-      "id": 26,
+      "id": 32,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 0,
-        "y": 53,
+        "y": 70,
         "w": 8,
         "h": 8
       },
@@ -1551,14 +1907,14 @@
       "type": "timeseries",
       "title": "Query latency (p99)",
       "description": "",
-      "id": 27,
+      "id": 33,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 8,
-        "y": 53,
+        "y": 70,
         "w": 8,
         "h": 8
       },
@@ -1615,14 +1971,14 @@
       "type": "timeseries",
       "title": "ACL lookups by source",
       "description": "cached, db, error, redacted (a redacted ACL sends the transaction to Synapse).",
-      "id": 28,
+      "id": 34,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 16,
-        "y": 53,
+        "y": 70,
         "w": 8,
         "h": 8
       },
@@ -1678,11 +2034,11 @@
     {
       "type": "row",
       "title": "Process: goinbound vs the Python inbound worker",
-      "id": 29,
+      "id": 35,
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 61,
+        "y": 78,
         "w": 24,
         "h": 1
       },
@@ -1692,14 +2048,14 @@
       "type": "timeseries",
       "title": "CPU",
       "description": "Cores used.",
-      "id": 30,
+      "id": 36,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 0,
-        "y": 62,
+        "y": 79,
         "w": 8,
         "h": 8
       },
@@ -1768,14 +2124,14 @@
       "type": "timeseries",
       "title": "Resident memory",
       "description": "",
-      "id": 31,
+      "id": 37,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 8,
-        "y": 62,
+        "y": 79,
         "w": 8,
         "h": 8
       },
@@ -1843,14 +2199,14 @@
       "type": "timeseries",
       "title": "Goroutines and restarts",
       "description": "Goroutines should track request concurrency, not grow. A restart is a step in process_start_time_seconds.",
-      "id": 32,
+      "id": 38,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 16,
-        "y": 62,
+        "y": 79,
         "w": 8,
         "h": 8
       },

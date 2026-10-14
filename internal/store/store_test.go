@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pdustore"
 )
 
 // TestEveryQueryIsASelect keeps this package read-only by construction.
@@ -227,8 +229,13 @@ func TestQueriesReadOnlyListedTables(t *testing.T) {
 	}
 	slices.Sort(inSQL)
 	want := slices.Clone(Tables)
+	for _, t := range pdustore.Tables {
+		if !slices.Contains(want, t) {
+			want = append(want, t)
+		}
+	}
 	slices.Sort(want)
 	if !slices.Equal(inSQL, want) {
-		t.Errorf("deploy/readonly-role.sql grants %v, Tables is %v", inSQL, want)
+		t.Errorf("deploy/readonly-role.sql grants %v, store and pdustore read %v", inSQL, want)
 	}
 }

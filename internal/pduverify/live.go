@@ -1,0 +1,280 @@
+package pduverify
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/rs/zerolog"
+	"github.com/tidwall/gjson"
+
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pdu"
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pdustore"
+)
+
+// Live is the PDU shadow: for each PDU of a transaction Synapse answered, it
+// waits for Synapse to persist the event, then checks what we would have
+// decided against what Synapse did. It never forwards or writes anything.
+type Live struct {
+	v       *Verifier
+	st      *pdustore.Store
+	log     zerolog.Logger
+	queue   chan job
+	maxWait time.Duration
+	onRes   func(string, *Result)
+	wg      sync.WaitGroup
+	ctx     context.Context
+	cancel  context.CancelFunc
+}
+
+type job struct {
+	raw      []byte
+	received time.Time
+}
+
+// LiveOptions tunes the shadow.
+type LiveOptions struct {
+	// Concurrency bounds PDUs checked at once. Zero uses 2.
+	Concurrency int
+	// Queue bounds PDUs waiting. A PDU that does not fit is dropped and
+	// counted. Zero uses 1000.
+	Queue int
+	// MaxWait bounds waiting for Synapse to persist a PDU. A PDU whose
+	// prev events Synapse must fetch can take minutes. Zero uses 5m.
+	MaxWait time.Duration
+	// OnResult, when set, is called with every check's result. For tests.
+	OnResult func(check string, r *Result)
+}
+
+// NewLive starts the shadow's workers.
+func NewLive(v *Verifier, st *pdustore.Store, o LiveOptions, log zerolog.Logger) *Live {
+	if o.Concurrency <= 0 {
+		o.Concurrency = 2
+	}
+	if o.Queue <= 0 {
+		o.Queue = 1000
+	}
+	if o.MaxWait <= 0 {
+		o.MaxWait = 5 * time.Minute
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	l := &Live{v: v, st: st, log: log, queue: make(chan job, o.Queue), maxWait: o.MaxWait, onRes: o.OnResult, ctx: ctx, cancel: cancel}
+	for i := 0; i < o.Concurrency; i++ {
+		l.wg.Add(1)
+		go l.work()
+	}
+	return l
+}
+
+// Close stops the workers, abandoning PDUs still queued.
+func (l *Live) Close() {
+	l.cancel()
+	close(l.queue)
+	l.wg.Wait()
+}
+
+// Submit queues a transaction's PDUs. It never blocks.
+func (l *Live) Submit(txnBody []byte) {
+	pdus := gjson.GetBytes(txnBody, "pdus")
+	if !pdus.IsArray() {
+		return
+	}
+	now := time.Now()
+	pdus.ForEach(func(_, p gjson.Result) bool {
+		select {
+		case l.queue <- job{raw: []byte(p.Raw), received: now}:
+		default:
+			liveDropped.Inc()
+		}
+		return true
+	})
+}
+
+func (l *Live) work() {
+	defer l.wg.Done()
+	for j := range l.queue {
+		if l.ctx.Err() != nil {
+			continue
+		}
+		l.check(j)
+	}
+}
+
+// check handles one PDU.
+func (l *Live) check(j job) {
+	ctx := l.ctx
+
+	roomID := gjson.GetBytes(j.raw, "room_id")
+	if roomID.Type != gjson.String {
+		l.record("received", OutcomeSkipped, "no room_id")
+		return
+	}
+	rvID, err := l.st.RoomVersion(ctx, roomID.Str)
+	if errors.Is(err, pdustore.ErrUnknownRoom) {
+		// Synapse ignores PDUs for rooms it does not know
+		// (federation_server.py:478); so do we.
+		l.record("received", OutcomeSkipped, "unknown room")
+		return
+	}
+	if err != nil {
+		l.record("received", OutcomeError, "room version lookup")
+		return
+	}
+	rv, ok := pdu.LookupRoomVersion(rvID)
+	if !ok {
+		l.record("received", OutcomeSkipped, "unsupported room version")
+		return
+	}
+
+	var eventID string
+	if rv.EventFormat == pdu.FormatV1V2 {
+		eventID = gjson.GetBytes(j.raw, "event_id").Str
+	} else if eventID, err = pdu.CalculateEventID(j.raw, rv); err != nil {
+		l.record("received", OutcomeSkipped, "event id not computable")
+		return
+	}
+	if eventID == "" {
+		l.record("received", OutcomeSkipped, "no event id")
+		return
+	}
+	log := l.log.With().Str("event_id", eventID).Str("room_id", roomID.Str).Logger()
+
+	persisted, err := l.waitPersisted(ctx, eventID, j.received)
+	if err != nil {
+		if ctx.Err() == nil {
+			l.record("received", OutcomeError, "waiting for persistence")
+		}
+		return
+	}
+	if !persisted {
+		l.notPersisted(ctx, j.raw, rv, eventID, log)
+		return
+	}
+
+	for _, c := range []struct {
+		name string
+		run  func(context.Context, string) *Result
+	}{{"signatures", l.v.CheckSigs}, {"state_auth", l.v.Replay}} {
+		res := c.run(ctx, eventID)
+		res.EventID = eventID
+		l.recordResult(c.name, res)
+		ev := log.Debug()
+		if res.Outcome == OutcomeMismatch {
+			ev = log.Warn()
+		}
+		ev.Str("check", c.name).Str("outcome", res.Outcome).Str("reason", res.Reason).
+			Str("type", res.Type).Bool("synapse_rejected", res.SynapseRej).Bool("our_rejected", res.OurRej).
+			Strs("state_diff", res.StateDiff).Int64("resolve_ms", res.ResolveMS).
+			Msg("PDU shadow")
+	}
+}
+
+// waitPersisted polls for the event until Synapse persists it or maxWait has
+// passed since it was received. Synapse handles a PDU in the background after
+// answering the transaction, so it is rarely there at once.
+func (l *Live) waitPersisted(ctx context.Context, eventID string, received time.Time) (bool, error) {
+	delay := 500 * time.Millisecond
+	for {
+		ok, err := l.st.EventExists(ctx, eventID)
+		if err != nil {
+			return false, err
+		}
+		if ok {
+			liveWait.Observe(time.Since(received).Seconds())
+			return true, nil
+		}
+		if time.Since(received)+delay > l.maxWait {
+			return false, nil
+		}
+		t := time.NewTimer(delay)
+		select {
+		case <-t.C:
+		case <-ctx.Done():
+			t.Stop()
+			return false, ctx.Err()
+		}
+		if delay < 30*time.Second {
+			delay *= 2
+		}
+	}
+}
+
+// notPersisted handles a PDU Synapse did not persist in time. Synapse drops a
+// PDU it cannot verify; if ours fails too, we agree. Otherwise it may still
+// be on its way (missing prev events), or Synapse dropped it for a reason not
+// reproduced here -- not a disagreement either way.
+func (l *Live) notPersisted(ctx context.Context, raw []byte, rv *pdu.RoomVersion, eventID string, log zerolog.Logger) {
+	ev, err := pdu.ParseEvent(raw, eventID, rv, false)
+	if err != nil {
+		l.record("received", OutcomeMatch, "malformed, not persisted")
+		return
+	}
+	lookup := func(server string, keyIDs []string) (map[string]pdu.VerifyKey, error) {
+		return l.st.VerifyKeys(ctx, server, keyIDs)
+	}
+	switch err := pdu.CheckSignatures(ev, raw, lookup); {
+	case err == nil:
+		l.record("received", OutcomeSkipped, "not persisted")
+		log.Debug().Msg("PDU shadow: Synapse has not persisted a PDU whose signatures verify")
+	case errors.Is(err, pdu.ErrKeyUnknown):
+		l.record("received", OutcomeSkipped, "not persisted, key unknown")
+	default:
+		var se *pdu.SignatureError
+		if errors.As(err, &se) {
+			l.record("received", OutcomeMatch, "bad signature, not persisted")
+			return
+		}
+		l.record("received", OutcomeRaise, "signatures")
+	}
+}
+
+// reasonLabel folds a free-text reason into a bounded metric label.
+func reasonLabel(outcome, reason string) string {
+	if outcome == OutcomeMatch && reason == "" {
+		return "ok"
+	}
+	for _, known := range []string{
+		"no room_id", "unknown room", "unsupported room version", "event id not computable", "no event id",
+		"room version lookup", "waiting for persistence", "malformed, not persisted", "not persisted, key unknown",
+		"not persisted", "bad signature, not persisted", "signatures",
+		"outlier", "create event", "prev event without state group", "a prev's state was computed after the event's",
+		"no state group for the event", "state resolution v1", "signing key not held", "signing key replaced",
+		"unparseable", "event id", "content hash", "state resolution", "auth",
+	} {
+		if strings.HasPrefix(reason, known) {
+			return known
+		}
+	}
+	return "other"
+}
+
+func (l *Live) record(check, outcome, reason string) {
+	l.recordResult(check, &Result{Outcome: outcome, Reason: reason})
+}
+
+func (l *Live) recordResult(check string, r *Result) {
+	liveChecks.WithLabelValues(check, r.Outcome, reasonLabel(r.Outcome, r.Reason)).Inc()
+	if l.onRes != nil {
+		l.onRes(check, r)
+	}
+}
+
+var (
+	liveChecks = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "goinbound_pdu_shadow_total",
+		Help: "PDU shadow checks by check (received, signatures, state_auth), outcome and reason.",
+	}, []string{"check", "outcome", "reason"})
+	liveDropped = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "goinbound_pdu_shadow_dropped_total",
+		Help: "PDUs not checked because the shadow queue was full.",
+	})
+	liveWait = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "goinbound_pdu_shadow_persist_wait_seconds",
+		Help:    "Time from receiving a PDU to seeing Synapse persist it.",
+		Buckets: []float64{.1, .25, .5, 1, 2.5, 5, 10, 30, 60, 120, 300},
+	})
+)

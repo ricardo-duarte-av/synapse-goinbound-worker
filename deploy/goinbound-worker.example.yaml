@@ -17,8 +17,12 @@ homeserver_yaml: /etc/synapse/homeserver.yaml
 #   native    serve natively whenever possible; anything uncertain is still
 #             forwarded
 #
-# pdu: transactions carrying any PDU. They go to the Python worker whole,
-#   their EDUs included. Only proxy exists: there is no PDU pipeline yet.
+# pdu: transactions carrying any PDU. They always go to the Python worker
+#   whole, their EDUs included.
+#   proxy     only that
+#   shadow    and afterwards check each PDU Synapse accepted: signatures,
+#             state resolution, auth verdict and resulting state, against
+#             what Synapse stored. Read-only; see pdu_shadow below.
 modes:
   edu: proxy
   pdu: proxy
@@ -60,3 +64,10 @@ database:
 shadow:
   concurrency: 4
   queue: 1000
+
+# modes.pdu: shadow. Each PDU is checked once Synapse has persisted it.
+pdu_shadow:
+  concurrency: 2
+  queue: 1000
+  max_wait_seconds: 300   # a PDU whose prev events Synapse must fetch can take minutes
+  max_conns: 4

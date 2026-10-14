@@ -511,3 +511,38 @@ func TestDebugLogsEachTransaction(t *testing.T) {
 		t.Errorf("info level logged a routine transaction: %s", buf.String())
 	}
 }
+
+type pduSink struct {
+	mu     sync.Mutex
+	bodies []string
+}
+
+func (p *pduSink) Submit(b []byte) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.bodies = append(p.bodies, string(b))
+}
+
+// modes.pdu: shadow hands every PDU transaction Synapse accepted to the PDU
+// shadow -- and nothing else, and not when Synapse refused it.
+func TestPDUShadowGetsAcceptedPDUTransactions(t *testing.T) {
+	for _, mode := range []string{config.ModeProxy, config.ModeShadow, config.ModeNative} {
+		t.Run(mode, func(t *testing.T) {
+			r := newRig(t, config.Mode{Kind: mode})
+			sink := &pduSink{}
+			r.h.pdus = sink
+
+			send(t, r.h, "remote.example", "t1", withPDU)
+			send(t, r.h, "remote.example", "t2", eduOnly)
+			r.up.status = http.StatusTooManyRequests
+			send(t, r.h, "remote.example", "t3", withPDU)
+
+			if len(sink.bodies) != 1 || sink.bodies[0] != withPDU {
+				t.Errorf("shadow got %d bodies %v; want only the accepted PDU transaction", len(sink.bodies), sink.bodies)
+			}
+			if r.up.count() < 2 {
+				t.Errorf("PDU transactions did not reach Synapse")
+			}
+		})
+	}
+}

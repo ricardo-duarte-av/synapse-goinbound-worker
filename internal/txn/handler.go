@@ -45,6 +45,12 @@ type TxnStore interface {
 	GetTxnState(ctx context.Context, origin, txnID string) (store.TxnState, error)
 }
 
+// PDUSink receives transactions with PDUs that Synapse accepted, for the PDU
+// shadow. It must not block.
+type PDUSink interface {
+	Submit(txnBody []byte)
+}
+
 // EDUs plans and executes a transaction's EDUs.
 type EDUs interface {
 	Plan(ctx context.Context, origin string, edus []edu.EDU) ([]edu.Step, error)
@@ -54,8 +60,11 @@ type EDUs interface {
 // Options builds a Handler.
 type Options struct {
 	// EDUMode is how EDU-only transactions are served. Transactions with
-	// PDUs are always proxied (modes.pdu: proxy is the only PDU mode).
-	EDUMode  config.Mode
+	// PDUs are always proxied.
+	EDUMode config.Mode
+	// PDUs, when set, gets every PDU-bearing transaction Synapse answered
+	// 200 (modes.pdu: shadow).
+	PDUs     PDUSink
 	Verifier Verifier
 	Upstream Upstream
 	Store    TxnStore
@@ -80,6 +89,7 @@ type Handler struct {
 	forwardTimeout time.Duration
 	coord          *coordinator
 	shadow         *shadowRunner
+	pdus           PDUSink
 	log            zerolog.Logger
 }
 
@@ -99,6 +109,7 @@ func NewHandler(o Options) *Handler {
 		maxBody:        o.MaxBody,
 		forwardTimeout: o.ForwardTimeout,
 		coord:          newCoordinator(responseCacheTTL),
+		pdus:           o.PDUs,
 		log:            o.Log,
 	}
 	if h.mode.Kind == config.ModeShadow {
@@ -141,7 +152,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.proxyRaw(w, r, reasonNotSend, rec)
 		return
 	}
-	if h.mode.Kind == config.ModeProxy {
+	if h.mode.Kind == config.ModeProxy && h.pdus == nil {
 		h.proxyRaw(w, r, reasonModeProxy, rec)
 		return
 	}
@@ -158,6 +169,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Too big to buffer: stream it on, read part and all.
 		r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(body), r.Body))
 		h.proxyRaw(w, r, reasonTooLarge, rec)
+		return
+	}
+
+	if h.mode.Kind == config.ModeProxy {
+		// Buffered only so the PDU shadow can read it.
+		h.proxyBody(w, r, body, reasonModeProxy, rec)
 		return
 	}
 
@@ -339,6 +356,11 @@ func (h *Handler) proxyRaw(w http.ResponseWriter, r *http.Request, reason string
 func (h *Handler) proxyBody(w http.ResponseWriter, r *http.Request, body []byte, reason string, rec *txnRec) proxy.Result {
 	res := h.upstream.Forward(w, withBody(r, body), 0)
 	h.recordProxy(res, reason, rec)
+	if h.pdus != nil && res.Status == http.StatusOK && hasPDUs(body) {
+		// Synapse took the transaction; its PDUs are now on their way
+		// through its staging area, and the shadow follows them there.
+		h.pdus.Submit(body)
+	}
 	return res
 }
 

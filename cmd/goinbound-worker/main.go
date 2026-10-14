@@ -25,8 +25,11 @@ import (
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/dbrole"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/edu"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/fedauth"
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pdustore"
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pduverify"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/proxy"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/replication"
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/stateres"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/store"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/synapsecfg"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/txn"
@@ -149,7 +152,7 @@ func run(cfg *config.Config, log zerolog.Logger) error {
 // homeserver.yaml or the database is not reachable from here yet.
 func buildHandler(ctx context.Context, cfg *config.Config, up *proxy.Proxy, log zerolog.Logger) (*txn.Handler, func(), error) {
 	noop := func() {}
-	if cfg.Modes.EDU.Kind == config.ModeProxy {
+	if cfg.Modes.EDU.Kind == config.ModeProxy && cfg.Modes.PDU.Kind == config.ModeProxy {
 		if hs, err := synapsecfg.Load(cfg.HomeserverYAML); err != nil {
 			log.Warn().Err(err).Msg("Cannot read homeserver.yaml; fine in proxy mode, required for any other")
 		} else {
@@ -163,7 +166,7 @@ func buildHandler(ctx context.Context, cfg *config.Config, up *proxy.Proxy, log 
 		return nil, noop, err
 	}
 
-	db, err := openDatabase(ctx, cfg, hs, log)
+	db, dbCfg, err := openDatabase(ctx, cfg, hs, log)
 	if err != nil {
 		return nil, noop, err
 	}
@@ -205,7 +208,27 @@ func buildHandler(ctx context.Context, cfg *config.Config, up *proxy.Proxy, log 
 		Bool("replication_secret", hs.ReplicationSecret != "").
 		Msg("EDU routing from homeserver.yaml")
 
-	h := txn.NewHandler(txn.Options{
+	var live *pduverify.Live
+	var pst *pdustore.Store
+	if cfg.Modes.PDU.Kind == config.ModeShadow {
+		maxConns := int32(cfg.PDUShadow.MaxConns)
+		if maxConns == 0 {
+			maxConns = 4
+		}
+		pst, err = pdustore.OpenAs(ctx, dbCfg.DSN, dbCfg.User, dbCfg.Password, maxConns)
+		if err != nil {
+			db.Close()
+			return nil, noop, fmt.Errorf("pdu shadow: %w", err)
+		}
+		live = pduverify.NewLive(pduverify.New(pst, stateres.Options{}), pst, pduverify.LiveOptions{
+			Concurrency: cfg.PDUShadow.Concurrency,
+			Queue:       cfg.PDUShadow.Queue,
+			MaxWait:     time.Duration(cfg.PDUShadow.MaxWaitSeconds) * time.Second,
+		}, log)
+		log.Info().Msg("PDU shadow on: PDUs Synapse accepts are checked once it has persisted them")
+	}
+
+	opts := txn.Options{
 		EDUMode:         cfg.Modes.EDU,
 		Verifier:        verifier,
 		Upstream:        up,
@@ -216,8 +239,19 @@ func buildHandler(ctx context.Context, cfg *config.Config, up *proxy.Proxy, log 
 		ForwardTimeout:  cfg.EDU.ForwardTimeout(),
 		Shadow:          cfg.Shadow,
 		Log:             log,
-	})
-	return h, func() { h.Close(); db.Close() }, nil
+	}
+	if live != nil {
+		opts.PDUs = live
+	}
+	h := txn.NewHandler(opts)
+	return h, func() {
+		h.Close()
+		if live != nil {
+			live.Close()
+			pst.Close()
+		}
+		db.Close()
+	}, nil
 }
 
 // openDatabase connects as the read-only role, making sure first that the role
@@ -228,14 +262,14 @@ func buildHandler(ctx context.Context, cfg *config.Config, up *proxy.Proxy, log 
 // with homeserver.yaml's credentials and try once more. Those credentials are
 // used for nothing else, and the connection made with them is closed before
 // serving starts.
-func openDatabase(ctx context.Context, cfg *config.Config, hs *synapsecfg.Config, log zerolog.Logger) (*store.Store, error) {
+func openDatabase(ctx context.Context, cfg *config.Config, hs *synapsecfg.Config, log zerolog.Logger) (*store.Store, store.Config, error) {
 	role := cfg.Database.RoleName()
 	password := dbrole.Password(hs.Database.Password, role)
 
 	dsn := cfg.Database.DSN
 	if dsn == "" {
 		if !hs.Database.Present {
-			return nil, errors.New("no database: set database.dsn, or give homeserver.yaml a database block")
+			return nil, store.Config{}, errors.New("no database: set database.dsn, or give homeserver.yaml a database block")
 		}
 		serving := hs.Database
 		serving.User, serving.Password = role, password
@@ -262,22 +296,22 @@ func openDatabase(ctx context.Context, cfg *config.Config, hs *synapsecfg.Config
 	db, problem := openChecked(ctx, storeCfg, connect)
 	if problem == nil {
 		log.Info().Str("role", role).Msg("Connected to the database as the read-only role")
-		return db, nil
+		return db, storeCfg, nil
 	}
 	if !cfg.Database.ManagesRole() {
-		return nil, fmt.Errorf("database role %s: %w (database.manage_role is false; create it with deploy/readonly-role.sql)", role, problem)
+		return nil, store.Config{}, fmt.Errorf("database role %s: %w (database.manage_role is false; create it with deploy/readonly-role.sql)", role, problem)
 	}
 	if !hs.Database.Present {
-		return nil, fmt.Errorf("database role %s: %w, and homeserver.yaml has no database block to create it with", role, problem)
+		return nil, store.Config{}, fmt.Errorf("database role %s: %w, and homeserver.yaml has no database block to create it with", role, problem)
 	}
 
 	log.Warn().Err(problem).Str("role", role).Str("admin", hs.Database.Redacted()).
 		Msg("Read-only role is missing or incomplete; creating or repairing it with homeserver.yaml's credentials")
 	ensureCtx, cancel := context.WithTimeout(ctx, connect+20*time.Second)
-	err := dbrole.Ensure(ensureCtx, hs.Database.DSN(), dbrole.Spec{Role: role, Password: password, Tables: store.Tables})
+	err := dbrole.Ensure(ensureCtx, hs.Database.DSN(), dbrole.Spec{Role: role, Password: password, Tables: roleTables()})
 	cancel()
 	if err != nil {
-		return nil, fmt.Errorf("database role %s: %w; and could not fix it: %w", role, problem, err)
+		return nil, store.Config{}, fmt.Errorf("database role %s: %w; and could not fix it: %w", role, problem, err)
 	}
 
 	db, err = openChecked(ctx, storeCfg, connect)
@@ -285,12 +319,26 @@ func openDatabase(ctx context.Context, cfg *config.Config, hs *synapsecfg.Config
 		// The role is right now, so the connection itself is the problem.
 		// The usual cause is a pooler that only knows the users in its own
 		// config.
-		return nil, fmt.Errorf("database role %s was created, but connecting as it still fails: %w "+
+		return nil, store.Config{}, fmt.Errorf("database role %s was created, but connecting as it still fails: %w "+
 			"(if database.dsn goes through pgcat or pgbouncer, add the role there, or point database.dsn "+
 			"at PostgreSQL directly, e.g. host=/var/sockets dbname=%s)", role, err, hs.Database.DBName)
 	}
 	log.Info().Str("role", role).Msg("Created or repaired the read-only role, and connected as it")
-	return db, nil
+	return db, storeCfg, nil
+}
+
+// roleTables is every table the read-only role is granted: those the EDU path
+// reads (package store) and those the PDU checker reads (package pdustore).
+func roleTables() []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, t := range append(append([]string{}, store.Tables...), pdustore.Tables...) {
+		if !seen[t] {
+			seen[t] = true
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // openChecked connects and verifies the role's grants, returning why not.
@@ -301,7 +349,7 @@ func openChecked(ctx context.Context, cfg store.Config, connect time.Duration) (
 	if err != nil {
 		return nil, err
 	}
-	missing, err := db.MissingPrivileges(openCtx)
+	missing, err := db.MissingPrivileges(openCtx, roleTables())
 	if err != nil {
 		db.Close()
 		return nil, err

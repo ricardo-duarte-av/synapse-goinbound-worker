@@ -129,6 +129,22 @@ ts("Disagreements and dropped evaluations", "Disagreements by Synapse's status; 
     (f'sum(increase(goinbound_shadow_dropped_total{{{G}}}{R}))', "dropped")], decimals=0)
 flush()
 
+# ---------------------------------------------------------------- PDU shadow
+row("PDU shadow (modes.pdu: shadow)")
+ts("PDU checks by outcome", "Each PDU Synapse accepted, once persisted: 'signatures' (event ID, content hash, signatures) and 'state_auth' (state resolution, auth verdict, resulting state). 'received' covers PDUs that never got that far. Any mismatch is a disagreement with Synapse worth reading in the log.",
+   [(f'sum by (check, outcome) (rate(goinbound_pdu_shadow_total{{{G}}}{R}))', "{{check}} {{outcome}}")], unit="ops", stack=True)
+ts("Mismatches and errors by reason", "",
+   [(f'sum by (check, outcome, reason) (increase(goinbound_pdu_shadow_total{{{G}, outcome=~"mismatch|error|raise"}}{R}))', "{{check}} {{outcome}}: {{reason}}")], decimals=0)
+ts("Skipped, by reason", "Events the comparison cannot be made for: outliers, prevs without state groups, prev state computed after the event's (Synapse used a remote's state), keys reissued since, room v1.",
+   [(f'sum by (check, reason) (rate(goinbound_pdu_shadow_total{{{G}, outcome="skipped"}}{R}))', "{{check}}: {{reason}}")], unit="ops", w=8)
+ts("Time for Synapse to persist a PDU", "From receipt to the event appearing in Synapse's database; the shadow waits for it.",
+   [(f'histogram_quantile(0.5, sum by (le) (rate(goinbound_pdu_shadow_persist_wait_seconds_bucket{{{G}}}{R})))', "p50"),
+    (f'histogram_quantile(0.95, sum by (le) (rate(goinbound_pdu_shadow_persist_wait_seconds_bucket{{{G}}}{R})))', "p95")], unit="s", w=8)
+ts("PDU shadow dropped and chain link batches", "PDUs not checked because the queue was full; and how many chain link batches Synapse would need per auth difference (above 1, Synapse's own v2.1 answer depends on set order).",
+   [(f'sum(increase(goinbound_pdu_shadow_dropped_total{{{G}}}{R}))', "dropped"),
+    (f'histogram_quantile(0.99, sum by (le) (rate(goinbound_pdu_chain_link_batches_bucket{{{G}}}{R})))', "p99 chain link batches")], w=8)
+flush()
+
 # ---------------------------------------------------------------- Synapse
 row("Synapse, for comparison")
 ts("Synapse: EDUs received over replication, by writer", "ReplicationFederationSendEduRestServlet on each Synapse instance: every EDU forwarded to it, from the Python worker or from us. Moving to native must not change this.",

@@ -3,7 +3,8 @@
 -- The worker creates and repairs this role itself at startup, with
 -- homeserver.yaml's credentials (internal/dbrole), unless database.manage_role
 -- is false. This file is for doing it by hand instead. The GRANT list must
--- match store.Tables; TestQueriesReadOnlyListedTables checks it.
+-- match store.Tables plus pdustore.Tables; TestQueriesReadOnlyListedTables
+-- checks it.
 --
 -- The worker only reads: published server keys, a room's current server ACL,
 -- an origin's retry state and Synapse's record of transactions it already
@@ -23,14 +24,26 @@ CREATE ROLE goinbound_ro WITH LOGIN;
 GRANT CONNECT ON DATABASE "synapse-db" TO goinbound_ro;
 GRANT USAGE ON SCHEMA public TO goinbound_ro;
 
--- Exactly the tables internal/store reads.
+-- Exactly the tables internal/store (EDU path) and internal/pdustore (PDU
+-- checker) read.
 GRANT SELECT ON
-    server_keys_json,
     current_state_events,
-    event_json,
-    redactions,
     destinations,
-    received_transactions
+    event_auth,
+    event_auth_chain_links,
+    event_auth_chains,
+    event_edges,
+    event_json,
+    event_to_state_groups,
+    events,
+    received_transactions,
+    redactions,
+    rejections,
+    rooms,
+    server_keys_json,
+    server_signature_keys,
+    state_group_edges,
+    state_groups_state
 TO goinbound_ro;
 
 -- Belt and braces: reject writes at the transaction level.

@@ -95,6 +95,17 @@ things that are not derivable from the code.
   than the event's, Synapse cannot have used it. That was the only cause of
   mismatches in the first sweep.
 
+- **The chain cover links query is Synapse's slowest part, not ours to copy.**
+  Synapse fetches links with one recursive query per thousand chains; in a
+  67k-member room that is 67 queries and 18s. Breadth-first plain queries
+  give the same links in a few round trips (2.6s for the whole resolution).
+  For v2.1 with >1000 chains Synapse's own answer depends on Python set
+  order; `goinbound_pdu_chain_link_batches` says how often that happens.
+- **Keys get reissued under the same ID.** A signature failure where the key
+  Synapse holds was stored after the event arrived is not evidence of anything.
+- **A failing content hash on a stored event is normal** when the event is
+  already in its redacted form: Synapse redacts on receipt and stores that.
+
 ## Traps
 
 - **Never name a metric label `instance` (or `job`).** Prometheus owns those.

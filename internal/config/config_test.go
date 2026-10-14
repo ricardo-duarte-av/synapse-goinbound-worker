@@ -72,7 +72,7 @@ func TestModesAreExplicit(t *testing.T) {
 		"no modes at all":   base,
 		"edu missing":       base + "modes:\n  pdu: proxy\n",
 		"pdu missing":       base + "modes:\n  edu: native\n",
-		"pdu not proxy":     base + "modes:\n  edu: native\n  pdu: shadow\n",
+		"pdu canary":        base + "modes:\n  edu: native\n  pdu: canary:5\n",
 		"pdu native":        base + "modes:\n  edu: proxy\n  pdu: native\n",
 		"the old mode: key": base + "mode: shadow\n",
 	}
@@ -118,5 +118,15 @@ func TestExampleConfigLoads(t *testing.T) {
 	}
 	if !strings.HasPrefix(cfg.HomeserverYAML, "/etc/synapse/") {
 		t.Errorf("example homeserver_yaml %q is not under the read-only mount", cfg.HomeserverYAML)
+	}
+}
+
+func TestPDUShadowIsAllowed(t *testing.T) {
+	cfg, err := parse([]byte(base + "modes:\n  edu: shadow\n  pdu: shadow\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Modes.PDU.Kind != ModeShadow {
+		t.Errorf("pdu mode = %s", cfg.Modes.PDU)
 	}
 }
