@@ -1,0 +1,46 @@
+-- Read-only PostgreSQL role for goinbound-worker.
+--
+-- The worker creates and repairs this role itself at startup, with
+-- homeserver.yaml's credentials (internal/dbrole), unless database.manage_role
+-- is false. This file is for doing it by hand instead. The GRANT list must
+-- match store.Tables; TestQueriesReadOnlyListedTables checks it.
+--
+-- The worker only reads: published server keys, a room's current server ACL,
+-- an origin's retry state and Synapse's record of transactions it already
+-- answered. Every write it causes is made by Synapse's own stream writers over
+-- replication. This role makes "never writes" a guarantee enforced by the
+-- database rather than a property of the code.
+--
+-- Run as a superuser against the Synapse database:
+--   psql -h /var/sockets -U synapse -d synapse-db -f readonly-role.sql
+--
+-- To undo:  DROP OWNED BY goinbound_ro; DROP ROLE goinbound_ro;
+
+BEGIN;
+
+CREATE ROLE goinbound_ro WITH LOGIN;
+
+GRANT CONNECT ON DATABASE "synapse-db" TO goinbound_ro;
+GRANT USAGE ON SCHEMA public TO goinbound_ro;
+
+-- Exactly the tables internal/store reads.
+GRANT SELECT ON
+    server_keys_json,
+    current_state_events,
+    event_json,
+    redactions,
+    destinations,
+    received_transactions
+TO goinbound_ro;
+
+-- Belt and braces: reject writes at the transaction level.
+ALTER ROLE goinbound_ro SET default_transaction_read_only = on;
+
+-- Every query is a primary-key lookup; anything slow is wrong.
+ALTER ROLE goinbound_ro SET statement_timeout = '10s';
+
+COMMIT;
+
+-- Verify: the first succeeds, the second must fail.
+--   psql -h /var/sockets -U goinbound_ro -d synapse-db -c 'select count(*) from destinations;'
+--   psql -h /var/sockets -U goinbound_ro -d synapse-db -c 'select count(*) from users;'

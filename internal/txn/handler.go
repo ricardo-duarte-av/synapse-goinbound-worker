@@ -1,0 +1,385 @@
+// Package txn is the front door for PUT /_matrix/federation/v1/send/{txnId}.
+//
+// Every /send request comes here. A transaction carrying only EDUs -- 96% of
+// them on this homeserver, most of those presence that Synapse throws away --
+// may be answered here, by forwarding each EDU to the stream writer Synapse
+// would forward it to. Everything else goes to the Python inbound worker,
+// untouched: transactions with PDUs, anything malformed, anything whose
+// handling depends on a detail this worker does not reproduce. The rule
+// throughout is that when in doubt, Synapse answers.
+//
+// Nothing here writes to the database. Synapse's stream writers do every write,
+// through the same replication endpoint the Python worker uses.
+package txn
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"hash/fnv"
+	"io"
+	"net/http"
+	"time"
+
+	"github.com/rs/zerolog"
+
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/config"
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/edu"
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/fedauth"
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/proxy"
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/store"
+)
+
+// Verifier authenticates an X-Matrix request.
+type Verifier interface {
+	Verify(r *http.Request) fedauth.Result
+}
+
+// Upstream forwards a request to the Python inbound worker.
+type Upstream interface {
+	Forward(w http.ResponseWriter, r *http.Request, captureLimit int64) proxy.Result
+}
+
+// TxnStore reads what decides whether a transaction may be answered here.
+type TxnStore interface {
+	GetTxnState(ctx context.Context, origin, txnID string) (store.TxnState, error)
+}
+
+// EDUs plans and executes a transaction's EDUs.
+type EDUs interface {
+	Plan(ctx context.Context, origin string, edus []edu.EDU) ([]edu.Step, error)
+	Execute(ctx context.Context, origin string, steps []edu.Step) error
+}
+
+// Options builds a Handler.
+type Options struct {
+	Mode     config.Mode
+	Verifier Verifier
+	Upstream Upstream
+	Store    TxnStore
+	EDUs     EDUs
+	// DomainWhitelist is federation_domain_whitelist; nil means none.
+	DomainWhitelist map[string]bool
+	MaxBody         int64
+	ForwardTimeout  time.Duration
+	Shadow          config.Shadow
+	Log             zerolog.Logger
+}
+
+// Handler serves /send.
+type Handler struct {
+	mode           config.Mode
+	verifier       Verifier
+	upstream       Upstream
+	store          TxnStore
+	edus           EDUs
+	whitelist      map[string]bool
+	maxBody        int64
+	forwardTimeout time.Duration
+	coord          *coordinator
+	shadow         *shadowRunner
+	log            zerolog.Logger
+}
+
+// responseCacheTTL is Synapse's _transaction_resp_cache timeout.
+const responseCacheTTL = 30 * time.Second
+
+// NewHandler builds a Handler. Store, Verifier and EDUs may be nil in proxy
+// mode, which uses none of them.
+func NewHandler(o Options) *Handler {
+	h := &Handler{
+		mode:           o.Mode,
+		verifier:       o.Verifier,
+		upstream:       o.Upstream,
+		store:          o.Store,
+		edus:           o.EDUs,
+		whitelist:      o.DomainWhitelist,
+		maxBody:        o.MaxBody,
+		forwardTimeout: o.ForwardTimeout,
+		coord:          newCoordinator(responseCacheTTL),
+		log:            o.Log,
+	}
+	if h.mode.Kind == config.ModeShadow {
+		h.shadow = newShadowRunner(h, o.Shadow)
+	}
+	return h
+}
+
+// Close stops background work.
+func (h *Handler) Close() {
+	if h.shadow != nil {
+		h.shadow.close()
+	}
+}
+
+// Reasons a request is proxied that are not about its body. Fixed set, for
+// metric labels.
+const (
+	reasonNotSend    = "not_send"
+	reasonModeProxy  = "mode_proxy"
+	reasonModeShadow = "mode_shadow"
+	reasonTooLarge   = "too_large"
+	reasonAuth       = "auth_failed"
+	reasonWhitelist  = "not_whitelisted"
+	reasonCanary     = "canary_not_selected"
+	reasonDBError    = "db_error"
+	reasonBackoff    = "origin_in_backoff"
+	reasonUncertain  = "uncertain"
+)
+
+func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+
+	txnID, version, ok := matchSend(r)
+	if !ok || version != "v1" || r.Method != http.MethodPut || txnID == "" {
+		// Not something we handle: other methods, v2, an undecodable or
+		// empty transaction id (Synapse raises on that). Synapse answers.
+		h.proxyRaw(w, r, reasonNotSend, start)
+		return
+	}
+	if h.mode.Kind == config.ModeProxy {
+		h.proxyRaw(w, r, reasonModeProxy, start)
+		return
+	}
+
+	body, complete, err := readBody(r, h.maxBody)
+	if err != nil {
+		// The sender went away mid-body. There is nobody to answer.
+		requests.WithLabelValues(routeAbandoned, "body_read").Inc()
+		return
+	}
+	if !complete {
+		// Too big to buffer: stream it on, read part and all.
+		r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(body), r.Body))
+		h.proxyRaw(w, r, reasonTooLarge, start)
+		return
+	}
+
+	if h.mode.Kind == config.ModeShadow {
+		pre := h.shadow.start(r, txnID)
+		res := h.proxyBody(w, r, body, reasonModeShadow, start)
+		h.shadow.submit(r, body, txnID, res.Status, pre)
+		return
+	}
+
+	h.serve(w, r, body, txnID, start)
+}
+
+// serve handles a buffered v1 /send in canary or native mode.
+func (h *Handler) serve(w http.ResponseWriter, r *http.Request, body []byte, txnID string, start time.Time) {
+	vr := h.verifier.Verify(withBody(r, body))
+	if !vr.OK() {
+		// Synapse gives the authoritative 401, or accepts a request we could
+		// not verify -- a key server we cannot reach, say. Either way it is
+		// Synapse's answer to give.
+		h.proxyBody(w, r, body, reasonAuth, start)
+		return
+	}
+	origin := vr.Origin
+
+	if h.whitelist != nil && !h.whitelist[origin] {
+		h.proxyBody(w, r, body, reasonWhitelist, start)
+		return
+	}
+
+	f, ok := h.claim(w, r, origin, txnID, start)
+	if !ok {
+		return
+	}
+
+	if ans, ok := h.coord.lookup(origin, txnID); ok {
+		h.coord.end(origin, f, nil)
+		h.write(w, ans, routeNative, "cached", start)
+		return
+	}
+
+	d := h.decide(r.Context(), origin, txnID, body, true, h.store.GetTxnState)
+	if d.proxyReason != "" {
+		h.proxyBody(w, r, body, d.proxyReason, start)
+		h.coord.end(origin, f, nil)
+		return
+	}
+	if d.stored != nil {
+		ans := answer{status: d.stored.Code, body: d.stored.JSON}
+		h.coord.end(origin, f, &ans)
+		h.write(w, ans, routeNative, "stored_response", start)
+		return
+	}
+
+	edu.Record("native", d.steps)
+
+	// Detached from the sender's connection: Synapse finishes a transaction
+	// whose sender hung up, and an EDU forwarded halfway is worse than one
+	// forwarded fully or not at all.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), h.forwardTimeout)
+	err := h.edus.Execute(ctx, origin, d.steps)
+	cancel()
+
+	if err != nil {
+		var fe *edu.ForwardError
+		msg := "Error handling EDUs"
+		if errors.As(err, &fe) {
+			msg = fe.Error()
+		}
+		// Not remembered: the sender retries, and the retry must be tried
+		// again rather than told it failed.
+		h.coord.end(origin, f, nil)
+		h.write(w, jsonError(http.StatusInternalServerError, "M_UNKNOWN", msg), routeNative, "forward_failed", start)
+		return
+	}
+
+	ans := answer{status: http.StatusOK, body: []byte(`{"pdus":{}}`)}
+	h.coord.end(origin, f, &ans)
+	h.write(w, ans, routeNative, "ok", start)
+}
+
+// claim takes the origin's one-transaction-at-a-time slot, waiting out a
+// concurrent attempt at the same transaction. It answers the request itself
+// when it returns false.
+func (h *Handler) claim(w http.ResponseWriter, r *http.Request, origin, txnID string, start time.Time) (*flight, bool) {
+	for {
+		own, wait, busy := h.coord.begin(origin, txnID)
+		switch {
+		case busy:
+			h.write(w, jsonError(http.StatusTooManyRequests, "M_UNKNOWN", "Too many concurrent transactions"),
+				routeNative, "concurrent_txn", start)
+			return nil, false
+		case wait != nil:
+			select {
+			case <-wait.done:
+				continue
+			case <-r.Context().Done():
+				requests.WithLabelValues(routeAbandoned, "waiting_for_retry").Inc()
+				return nil, false
+			}
+		default:
+			return own, true
+		}
+	}
+}
+
+// decision is what to do with a transaction.
+type decision struct {
+	// proxyReason is set when Synapse must answer.
+	proxyReason string
+	// stored is set when Synapse already answered this transaction.
+	stored *store.StoredResponse
+	// steps is the EDU plan otherwise.
+	steps []edu.Step
+}
+
+// stateFunc reads a transaction's state; see TxnStore.
+type stateFunc func(ctx context.Context, origin, txnID string) (store.TxnState, error)
+
+// decide works out whether a verified transaction can be answered here, and
+// how. It has no effects. applyCanary is false in shadow mode, which asks what
+// native mode would do; shadow mode also supplies state read before Synapse
+// saw the request.
+func (h *Handler) decide(ctx context.Context, origin, txnID string, body []byte, applyCanary bool, state stateFunc) decision {
+	edus, reason := classify(body)
+	if reason != "" {
+		return decision{proxyReason: reason}
+	}
+	if applyCanary && h.mode.Kind == config.ModeCanary && !canarySelected(origin, h.mode.CanaryPercent) {
+		return decision{proxyReason: reasonCanary}
+	}
+
+	st, err := state(ctx, origin, txnID)
+	if err != nil {
+		h.log.Warn().Err(err).Str("origin", origin).Msg("Could not read transaction state; leaving it to Synapse")
+		return decision{proxyReason: reasonDBError}
+	}
+	if st.RetryLastTS != 0 {
+		// Synapse resets the backoff of an origin that sends us a signed
+		// request, and tells every worker it is back up
+		// (transport/server/_base.py:143). Only Synapse can do that
+		// correctly -- it is a write plus a cache invalidation streamed to
+		// every instance -- so it gets the request.
+		return decision{proxyReason: reasonBackoff}
+	}
+	if st.Previous != nil {
+		return decision{stored: st.Previous}
+	}
+
+	steps, err := h.edus.Plan(ctx, origin, edus)
+	if err != nil {
+		if !errors.Is(err, edu.ErrUncertain) {
+			h.log.Warn().Err(err).Str("origin", origin).Msg("Could not plan EDUs; leaving the transaction to Synapse")
+			return decision{proxyReason: reasonDBError}
+		}
+		return decision{proxyReason: reasonUncertain}
+	}
+	return decision{steps: steps}
+}
+
+// canarySelected picks a stable subset of origins. Selecting by origin rather
+// than by request keeps every transaction of one origin on the same path, so
+// its transactions are never handled by two processes at once.
+func canarySelected(origin string, percent int) bool {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(origin))
+	return int(h.Sum32()%100) < percent
+}
+
+func (h *Handler) proxyRaw(w http.ResponseWriter, r *http.Request, reason string, start time.Time) proxy.Result {
+	res := h.upstream.Forward(w, r, 0)
+	h.recordProxy(res, reason, start)
+	return res
+}
+
+func (h *Handler) proxyBody(w http.ResponseWriter, r *http.Request, body []byte, reason string, start time.Time) proxy.Result {
+	res := h.upstream.Forward(w, withBody(r, body), 0)
+	h.recordProxy(res, reason, start)
+	return res
+}
+
+func (h *Handler) recordProxy(res proxy.Result, reason string, start time.Time) {
+	route := routeProxy
+	if res.Canceled {
+		route = routeAbandoned
+	}
+	requests.WithLabelValues(route, reason).Inc()
+	duration.WithLabelValues(routeProxy).Observe(time.Since(start).Seconds())
+	if res.Err != nil {
+		upstreamErrors.Inc()
+	}
+}
+
+func (h *Handler) write(w http.ResponseWriter, ans answer, route, outcome string, start time.Time) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(ans.status)
+	_, _ = w.Write(ans.body)
+	requests.WithLabelValues(route, outcome).Inc()
+	duration.WithLabelValues(route).Observe(time.Since(start).Seconds())
+}
+
+func jsonError(status int, errcode, msg string) answer {
+	b, _ := marshalError(errcode, msg)
+	return answer{status: status, body: b}
+}
+
+// readBody reads at most limit bytes. complete is false when the body is
+// larger, in which case what was read is returned for the caller to replay.
+func readBody(r *http.Request, limit int64) (body []byte, complete bool, err error) {
+	if r.Body == nil {
+		return nil, true, nil
+	}
+	b, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
+	if err != nil {
+		return nil, false, err
+	}
+	if int64(len(b)) > limit {
+		return b, false, nil
+	}
+	return b, true, nil
+}
+
+// withBody returns r carrying a fresh reader over body. Both verification and
+// proxying consume the body, so each gets its own.
+func withBody(r *http.Request, body []byte) *http.Request {
+	r2 := r.Clone(r.Context())
+	r2.Body = io.NopCloser(bytes.NewReader(body))
+	r2.ContentLength = int64(len(body))
+	r2.TransferEncoding = nil
+	return r2
+}

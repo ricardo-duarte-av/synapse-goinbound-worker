@@ -1,0 +1,63 @@
+# goinbound-worker.
+#
+# A standalone compose file for running the worker beside an existing Synapse
+# deployment, written to match the Synapse worker services there (unix sockets
+# under /var/sockets, the npm-nw networks, uid 991).
+#
+# Before first start:
+#
+#   mkdir -p ./goinbound
+#   cp deploy/goinbound-worker.example.yaml ./goinbound/goinbound-worker.yaml
+#   chown -R 991:991 ./goinbound
+#
+# The read-only database role is created on first start, with homeserver.yaml's
+# credentials (deploy/readonly-role.sql does the same by hand).
+#
+# Then point nginx's /send location at it (deploy/nginx.conf.example). It
+# starts in proxy mode, which changes nothing.
+
+services:
+  av-goinbound-worker-1:
+    image: ghcr.io/ricardo-duarte-av/synapse-goinbound-worker:latest
+    container_name: av-goinbound-worker-1
+    restart: unless-stopped
+    user: "991:991"
+
+    command: ["-config", "/data/goinbound-worker.yaml"]
+
+    volumes:
+      # goinbound-worker.yaml.
+      - ./goinbound:/data
+      # Synapse's config directory, READ-ONLY: homeserver.yaml is the source
+      # of truth for stream writers, the instance map, the replication
+      # secret and the database, and this worker must never be able to
+      # change it.
+      - /opt/matrix/synapse/synapse:/etc/synapse:ro
+      # nginx reaches us here; we reach the Python inbound worker, the
+      # stream writers' replication sockets and PostgreSQL here.
+      - /var/sockets:/var/sockets
+
+    networks:
+      - npm-nw6
+      - npm-nw
+
+    # Distroless: no curl, so the binary probes its own listener.
+    healthcheck:
+      test: ["CMD", "/goinbound-worker", "-healthcheck", "-config", "/data/goinbound-worker.yaml"]
+      start_period: "2s"
+      interval: "10s"
+      timeout: "5s"
+      retries: 3
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+networks:
+  npm-nw6:
+    external: true
+  npm-nw:
+    external: true
+    enable_ipv6: false

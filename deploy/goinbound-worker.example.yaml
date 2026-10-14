@@ -1,0 +1,55 @@
+# goinbound-worker configuration.
+#
+# Only what is ours is here. Stream writers, the instance map, the replication
+# secret, track_presence, trusted_key_servers, federation_domain_whitelist and
+# the database are all read from homeserver.yaml, so they cannot drift.
+
+# Synapse's config, mounted read-only.
+homeserver_yaml: /etc/synapse/homeserver.yaml
+
+# How EDU-only /send transactions are served. Transactions with PDUs always go
+# to the Python worker.
+#
+#   proxy     forward everything untouched (the first deploy: changes nothing)
+#   shadow    forward everything, then count what native would have done
+#   canary:N  serve EDU-only transactions natively for N% of origins
+#   native    serve every eligible EDU-only transaction natively
+mode: proxy
+
+# nginx connects here.
+listen:
+  socket: /var/sockets/nginx/av-goinbound-worker-1.sock
+  socket_mode: "0660"
+
+# The Python inbound federation worker: it handles every PDU, and anything we
+# leave to it.
+upstream:
+  sockets:
+    - /var/sockets/nginx/av-inbound-federation-worker-1.sock
+  timeout_seconds: 180
+
+metrics:
+  addr: ":9200"
+
+log:
+  level: info
+  pretty: false
+
+database:
+  # The read-only role this worker serves with. On every start it connects
+  # as this role and checks its grants; if the role is missing or lacks
+  # something, it is created or repaired with homeserver.yaml's credentials.
+  role: goinbound_ro
+  # manage_role: false   # never touch the role; create it by hand instead
+  #
+  # How to reach PostgreSQL as the role (any user named here is replaced by
+  # `role`). It must reach PostgreSQL directly: homeserver.yaml goes through
+  # pgcat, which only accepts the users in its own config. The unix socket is
+  # trusted by pg_hba, so no password is needed. Over TCP, the role's password
+  # is derived from homeserver.yaml's and supplied automatically.
+  dsn: "host=/var/sockets dbname=synapse-db"
+  max_conns: 4
+
+shadow:
+  concurrency: 4
+  queue: 1000
