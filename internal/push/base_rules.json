@@ -1,0 +1,911 @@
+{
+ "synapse_version": "1.162.0",
+ "rules": [
+  {
+   "rule_id": "global/override/.m.rule.master",
+   "priority_class": 5,
+   "conditions": [],
+   "actions": [],
+   "default": true,
+   "default_enabled": false
+  },
+  {
+   "rule_id": "global/override/.org.matrix.msc4028.encrypted_event",
+   "priority_class": 5,
+   "conditions": [
+    {
+     "kind": "event_match",
+     "key": "type",
+     "pattern": "m.room.encrypted"
+    }
+   ],
+   "actions": [
+    "notify"
+   ],
+   "default": true,
+   "default_enabled": true
+  },
+  {
+   "rule_id": "global/override/.m.rule.suppress_notices",
+   "priority_class": 5,
+   "conditions": [
+    {
+     "kind": "event_match",
+     "key": "content.msgtype",
+     "pattern": "m.notice"
+    }
+   ],
+   "actions": [],
+   "default": true,
+   "default_enabled": true
+  },
+  {
+   "rule_id": "global/override/.m.rule.invite_for_me",
+   "priority_class": 5,
+   "conditions": [
+    {
+     "kind": "event_match",
+     "key": "type",
+     "pattern": "m.room.member"
+    },
+    {
+     "kind": "event_match",
+     "key": "content.membership",
+     "pattern": "invite"
+    },
+    {
+     "kind": "event_match",
+     "key": "state_key",
+     "pattern_type": "user_id"
+    }
+   ],
+   "actions": [
+    "notify",
+    {
+     "set_tweak": "highlight",
+     "value": false
+    },
+    {
+     "set_tweak": "sound",
+     "value": "default"
+    }
+   ],
+   "default": true,
+   "default_enabled": true
+  },
+  {
+   "rule_id": "global/override/.m.rule.member_event",
+   "priority_class": 5,
+   "conditions": [
+    {
+     "kind": "event_match",
+     "key": "type",
+     "pattern": "m.room.member"
+    }
+   ],
+   "actions": [],
+   "default": true,
+   "default_enabled": true
+  },
+  {
+   "rule_id": "global/override/.im.nheko.msc3664.reply",
+   "priority_class": 5,
+   "conditions": [
+    {
+     "kind": "im.nheko.msc3664.related_event_match",
+     "key": "sender",
+     "pattern_type": "user_id",
+     "rel_type": "m.in_reply_to"
+    }
+   ],
+   "actions": [
+    "notify",
+    {
+     "set_tweak": "highlight"
+    },
+    {
+     "set_tweak": "sound",
+     "value": "default"
+    }
+   ],
+   "default": true,
+   "default_enabled": true
+  },
+  {
+   "rule_id": "global/override/.m.rule.is_user_mention",
+   "priority_class": 5,
+   "conditions": [
+    {
+     "kind": "event_property_contains",
+     "key": "content.m\\.mentions.user_ids",
+     "value_type": "user_id"
+    }
+   ],
+   "actions": [
+    "notify",
+    {
+     "set_tweak": "highlight"
+    },
+    {
+     "set_tweak": "sound",
+     "value": "default"
+    }
+   ],
+   "default": true,
+   "default_enabled": true
+  },
+  {
+   "rule_id": "global/override/.m.rule.contains_display_name",
+   "priority_class": 5,
+   "conditions": [
+    {
+     "kind": "contains_display_name"
+    }
+   ],
+   "actions": [
+    "notify",
+    {
+     "set_tweak": "highlight"
+    },
+    {
+     "set_tweak": "sound",
+     "value": "default"
+    }
+   ],
+   "default": true,
+   "default_enabled": true
+  },
+  {
+   "rule_id": "global/override/.m.rule.is_room_mention",
+   "priority_class": 5,
+   "conditions": [
+    {
+     "kind": "event_property_is",
+     "key": "content.m\\.mentions.room",
+     "value": true
+    },
+    {
+     "kind": "sender_notification_permission",
+     "key": "room"
+    }
+   ],
+   "actions": [
+    "notify",
+    {
+     "set_tweak": "highlight"
+    }
+   ],
+   "default": true,
+   "default_enabled": true
+  },
+  {
+   "rule_id": "global/override/.m.rule.roomnotif",
+   "priority_class": 5,
+   "conditions": [
+    {
+     "kind": "sender_notification_permission",
+     "key": "room"
+    },
+    {
+     "kind": "event_match",
+     "key": "content.body",
+     "pattern": "@room"
+    }
+   ],
+   "actions": [
+    "notify",
+    {
+     "set_tweak": "highlight"
+    }
+   ],
+   "default": true,
+   "default_enabled": true
+  },
+  {
+   "rule_id": "global/override/.m.rule.tombstone",
+   "priority_class": 5,
+   "conditions": [
+    {
+     "kind": "event_match",
+     "key": "type",
+     "pattern": "m.room.tombstone"
+    },
+    {
+     "kind": "event_match",
+     "key": "state_key",
+     "pattern": ""
+    }
+   ],
+   "actions": [
+    "notify",
+    {
+     "set_tweak": "highlight"
+    }
+   ],
+   "default": true,
+   "default_enabled": true
+  },
+  {
+   "rule_id": "global/override/.m.rule.reaction",
+   "priority_class": 5,
+   "conditions": [
+    {
+     "kind": "event_match",
+     "key": "type",
+     "pattern": "m.reaction"
+    }
+   ],
+   "actions": [],
+   "default": true,
+   "default_enabled": true
+  },
+  {
+   "rule_id": "global/override/.m.rule.room.server_acl",
+   "priority_class": 5,
+   "conditions": [
+    {
+     "kind": "event_match",
+     "key": "type",
+     "pattern": "m.room.server_acl"
+    },
+    {
+     "kind": "event_match",
+     "key": "state_key",
+     "pattern": ""
+    }
+   ],
+   "actions": [],
+   "default": true,
+   "default_enabled": true
+  },
+  {
+   "rule_id": "global/override/.m.rule.suppress_edits",
+   "priority_class": 5,
+   "conditions": [
+    {
+     "kind": "event_property_is",
+     "key": "content.m\\.relates_to.rel_type",
+     "value": "m.replace"
+    }
+   ],
+   "actions": [],
+   "default": true,
+   "default_enabled": true
+  },
+  {
+   "rule_id": "global/override/.org.matrix.msc3930.rule.poll_response",
+   "priority_class": 5,
+   "conditions": [
+    {
+     "kind": "event_match",
+     "key": "type",
+     "pattern": "org.matrix.msc3381.poll.response"
+    }
+   ],
+   "actions": [],
+   "default": true,
+   "default_enabled": true
+  },
+  {
+   "rule_id": "global/content/.m.rule.contains_user_name",
+   "priority_class": 4,
+   "conditions": [
+    {
+     "kind": "event_match",
+     "key": "content.body",
+     "pattern_type": "user_localpart"
+    }
+   ],
+   "actions": [
+    "notify",
+    {
+     "set_tweak": "highlight"
+    },
+    {
+     "set_tweak": "sound",
+     "value": "default"
+    }
+   ],
+   "default": true,
+   "default_enabled": true
+  },
+  {
+   "rule_id": "global/postcontent/.io.element.msc4306.rule.unsubscribed_thread",
+   "priority_class": 6,
+   "conditions": [
+    {
+     "kind": "io.element.msc4306.thread_subscription",
+     "subscribed": false
+    }
+   ],
+   "actions": [],
+   "default": true,
+   "default_enabled": true
+  },
+  {
+   "rule_id": "global/postcontent/.io.element.msc4306.rule.subscribed_thread",
+   "priority_class": 6,
+   "conditions": [
+    {
+     "kind": "io.element.msc4306.thread_subscription",
+     "subscribed": true
+    }
+   ],
+   "actions": [
+    "notify",
+    {
+     "set_tweak": "sound",
+     "value": "default"
+    }
+   ],
+   "default": true,
+   "default_enabled": true
+  },
+  {
+   "rule_id": "global/underride/.m.rule.call",
+   "priority_class": 1,
+   "conditions": [
+    {
+     "kind": "event_match",
+     "key": "type",
+     "pattern": "m.call.invite"
+    }
+   ],
+   "actions": [
+    "notify",
+    {
+     "set_tweak": "sound",
+     "value": "ring"
+    },
+    {
+     "set_tweak": "highlight",
+     "value": false
+    }
+   ],
+   "default": true,
+   "default_enabled": true
+  },
+  {
+   "rule_id": "global/underride/.m.rule.encrypted_room_one_to_one",
+   "priority_class": 1,
+   "conditions": [
+    {
+     "kind": "event_match",
+     "key": "type",
+     "pattern": "m.room.encrypted"
+    },
+    {
+     "kind": "room_member_count",
+     "is": "2"
+    }
+   ],
+   "actions": [
+    "notify",
+    {
+     "set_tweak": "sound",
+     "value": "default"
+    },
+    {
+     "set_tweak": "highlight",
+     "value": false
+    }
+   ],
+   "default": true,
+   "default_enabled": true
+  },
+  {
+   "rule_id": "global/underride/.m.rule.room_one_to_one",
+   "priority_class": 1,
+   "conditions": [
+    {
+     "kind": "event_match",
+     "key": "type",
+     "pattern": "m.room.message"
+    },
+    {
+     "kind": "room_member_count",
+     "is": "2"
+    }
+   ],
+   "actions": [
+    "notify",
+    {
+     "set_tweak": "sound",
+     "value": "default"
+    },
+    {
+     "set_tweak": "highlight",
+     "value": false
+    }
+   ],
+   "default": true,
+   "default_enabled": true
+  },
+  {
+   "rule_id": "global/underride/.org.matrix.msc3933.rule.extensible.encrypted_room_one_to_one",
+   "priority_class": 1,
+   "conditions": [
+    {
+     "kind": "event_match",
+     "key": "type",
+     "pattern": "org.matrix.msc1767.encrypted"
+    },
+    {
+     "kind": "room_member_count",
+     "is": "2"
+    },
+    {
+     "kind": "org.matrix.msc3931.room_version_supports",
+     "feature": "org.matrix.msc3932.extensible_events"
+    }
+   ],
+   "actions": [
+    "notify",
+    {
+     "set_tweak": "sound",
+     "value": "default"
+    },
+    {
+     "set_tweak": "highlight",
+     "value": false
+    }
+   ],
+   "default": true,
+   "default_enabled": true
+  },
+  {
+   "rule_id": "global/underride/.org.matrix.msc3933.rule.extensible.message.room_one_to_one",
+   "priority_class": 1,
+   "conditions": [
+    {
+     "kind": "event_match",
+     "key": "type",
+     "pattern": "org.matrix.msc1767.message"
+    },
+    {
+     "kind": "room_member_count",
+     "is": "2"
+    },
+    {
+     "kind": "org.matrix.msc3931.room_version_supports",
+     "feature": "org.matrix.msc3932.extensible_events"
+    }
+   ],
+   "actions": [
+    "notify",
+    {
+     "set_tweak": "sound",
+     "value": "default"
+    },
+    {
+     "set_tweak": "highlight",
+     "value": false
+    }
+   ],
+   "default": true,
+   "default_enabled": true
+  },
+  {
+   "rule_id": "global/underride/.org.matrix.msc3933.rule.extensible.file.room_one_to_one",
+   "priority_class": 1,
+   "conditions": [
+    {
+     "kind": "event_match",
+     "key": "type",
+     "pattern": "org.matrix.msc1767.file"
+    },
+    {
+     "kind": "room_member_count",
+     "is": "2"
+    },
+    {
+     "kind": "org.matrix.msc3931.room_version_supports",
+     "feature": "org.matrix.msc3932.extensible_events"
+    }
+   ],
+   "actions": [
+    "notify",
+    {
+     "set_tweak": "sound",
+     "value": "default"
+    },
+    {
+     "set_tweak": "highlight",
+     "value": false
+    }
+   ],
+   "default": true,
+   "default_enabled": true
+  },
+  {
+   "rule_id": "global/underride/.org.matrix.msc3933.rule.extensible.image.room_one_to_one",
+   "priority_class": 1,
+   "conditions": [
+    {
+     "kind": "event_match",
+     "key": "type",
+     "pattern": "org.matrix.msc1767.image"
+    },
+    {
+     "kind": "room_member_count",
+     "is": "2"
+    },
+    {
+     "kind": "org.matrix.msc3931.room_version_supports",
+     "feature": "org.matrix.msc3932.extensible_events"
+    }
+   ],
+   "actions": [
+    "notify",
+    {
+     "set_tweak": "sound",
+     "value": "default"
+    },
+    {
+     "set_tweak": "highlight",
+     "value": false
+    }
+   ],
+   "default": true,
+   "default_enabled": true
+  },
+  {
+   "rule_id": "global/underride/.org.matrix.msc3933.rule.extensible.video.room_one_to_one",
+   "priority_class": 1,
+   "conditions": [
+    {
+     "kind": "event_match",
+     "key": "type",
+     "pattern": "org.matrix.msc1767.video"
+    },
+    {
+     "kind": "room_member_count",
+     "is": "2"
+    },
+    {
+     "kind": "org.matrix.msc3931.room_version_supports",
+     "feature": "org.matrix.msc3932.extensible_events"
+    }
+   ],
+   "actions": [
+    "notify",
+    {
+     "set_tweak": "sound",
+     "value": "default"
+    },
+    {
+     "set_tweak": "highlight",
+     "value": false
+    }
+   ],
+   "default": true,
+   "default_enabled": true
+  },
+  {
+   "rule_id": "global/underride/.org.matrix.msc3933.rule.extensible.audio.room_one_to_one",
+   "priority_class": 1,
+   "conditions": [
+    {
+     "kind": "event_match",
+     "key": "type",
+     "pattern": "org.matrix.msc1767.audio"
+    },
+    {
+     "kind": "room_member_count",
+     "is": "2"
+    },
+    {
+     "kind": "org.matrix.msc3931.room_version_supports",
+     "feature": "org.matrix.msc3932.extensible_events"
+    }
+   ],
+   "actions": [
+    "notify",
+    {
+     "set_tweak": "sound",
+     "value": "default"
+    },
+    {
+     "set_tweak": "highlight",
+     "value": false
+    }
+   ],
+   "default": true,
+   "default_enabled": true
+  },
+  {
+   "rule_id": "global/underride/.m.rule.message",
+   "priority_class": 1,
+   "conditions": [
+    {
+     "kind": "event_match",
+     "key": "type",
+     "pattern": "m.room.message"
+    }
+   ],
+   "actions": [
+    "notify",
+    {
+     "set_tweak": "highlight",
+     "value": false
+    }
+   ],
+   "default": true,
+   "default_enabled": true
+  },
+  {
+   "rule_id": "global/underride/.m.rule.encrypted",
+   "priority_class": 1,
+   "conditions": [
+    {
+     "kind": "event_match",
+     "key": "type",
+     "pattern": "m.room.encrypted"
+    }
+   ],
+   "actions": [
+    "notify",
+    {
+     "set_tweak": "highlight",
+     "value": false
+    }
+   ],
+   "default": true,
+   "default_enabled": true
+  },
+  {
+   "rule_id": "global/underride/.org.matrix.msc1767.rule.extensible.encrypted",
+   "priority_class": 1,
+   "conditions": [
+    {
+     "kind": "event_match",
+     "key": "type",
+     "pattern": "m.encrypted"
+    },
+    {
+     "kind": "org.matrix.msc3931.room_version_supports",
+     "feature": "org.matrix.msc3932.extensible_events"
+    }
+   ],
+   "actions": [
+    "notify",
+    {
+     "set_tweak": "highlight",
+     "value": false
+    }
+   ],
+   "default": true,
+   "default_enabled": true
+  },
+  {
+   "rule_id": "global/underride/.org.matrix.msc1767.rule.extensible.message",
+   "priority_class": 1,
+   "conditions": [
+    {
+     "kind": "event_match",
+     "key": "type",
+     "pattern": "m.message"
+    },
+    {
+     "kind": "org.matrix.msc3931.room_version_supports",
+     "feature": "org.matrix.msc3932.extensible_events"
+    }
+   ],
+   "actions": [
+    "notify",
+    {
+     "set_tweak": "highlight",
+     "value": false
+    }
+   ],
+   "default": true,
+   "default_enabled": true
+  },
+  {
+   "rule_id": "global/underride/.org.matrix.msc1767.rule.extensible.file",
+   "priority_class": 1,
+   "conditions": [
+    {
+     "kind": "event_match",
+     "key": "type",
+     "pattern": "m.file"
+    },
+    {
+     "kind": "org.matrix.msc3931.room_version_supports",
+     "feature": "org.matrix.msc3932.extensible_events"
+    }
+   ],
+   "actions": [
+    "notify",
+    {
+     "set_tweak": "highlight",
+     "value": false
+    }
+   ],
+   "default": true,
+   "default_enabled": true
+  },
+  {
+   "rule_id": "global/underride/.org.matrix.msc1767.rule.extensible.image",
+   "priority_class": 1,
+   "conditions": [
+    {
+     "kind": "event_match",
+     "key": "type",
+     "pattern": "m.image"
+    },
+    {
+     "kind": "org.matrix.msc3931.room_version_supports",
+     "feature": "org.matrix.msc3932.extensible_events"
+    }
+   ],
+   "actions": [
+    "notify",
+    {
+     "set_tweak": "highlight",
+     "value": false
+    }
+   ],
+   "default": true,
+   "default_enabled": true
+  },
+  {
+   "rule_id": "global/underride/.org.matrix.msc1767.rule.extensible.video",
+   "priority_class": 1,
+   "conditions": [
+    {
+     "kind": "event_match",
+     "key": "type",
+     "pattern": "m.video"
+    },
+    {
+     "kind": "org.matrix.msc3931.room_version_supports",
+     "feature": "org.matrix.msc3932.extensible_events"
+    }
+   ],
+   "actions": [
+    "notify",
+    {
+     "set_tweak": "highlight",
+     "value": false
+    }
+   ],
+   "default": true,
+   "default_enabled": true
+  },
+  {
+   "rule_id": "global/underride/.org.matrix.msc1767.rule.extensible.audio",
+   "priority_class": 1,
+   "conditions": [
+    {
+     "kind": "event_match",
+     "key": "type",
+     "pattern": "m.audio"
+    },
+    {
+     "kind": "org.matrix.msc3931.room_version_supports",
+     "feature": "org.matrix.msc3932.extensible_events"
+    }
+   ],
+   "actions": [
+    "notify",
+    {
+     "set_tweak": "highlight",
+     "value": false
+    }
+   ],
+   "default": true,
+   "default_enabled": true
+  },
+  {
+   "rule_id": "global/underride/.im.vector.jitsi",
+   "priority_class": 1,
+   "conditions": [
+    {
+     "kind": "event_match",
+     "key": "type",
+     "pattern": "im.vector.modular.widgets"
+    },
+    {
+     "kind": "event_match",
+     "key": "content.type",
+     "pattern": "jitsi"
+    },
+    {
+     "kind": "event_match",
+     "key": "state_key",
+     "pattern": "*"
+    }
+   ],
+   "actions": [
+    "notify",
+    {
+     "set_tweak": "highlight",
+     "value": false
+    }
+   ],
+   "default": true,
+   "default_enabled": true
+  },
+  {
+   "rule_id": "global/underride/.org.matrix.msc3930.rule.poll_start_one_to_one",
+   "priority_class": 1,
+   "conditions": [
+    {
+     "kind": "room_member_count",
+     "is": "2"
+    },
+    {
+     "kind": "event_match",
+     "key": "type",
+     "pattern": "org.matrix.msc3381.poll.start"
+    }
+   ],
+   "actions": [
+    "notify",
+    {
+     "set_tweak": "sound",
+     "value": "default"
+    }
+   ],
+   "default": true,
+   "default_enabled": true
+  },
+  {
+   "rule_id": "global/underride/.org.matrix.msc3930.rule.poll_start",
+   "priority_class": 1,
+   "conditions": [
+    {
+     "kind": "event_match",
+     "key": "type",
+     "pattern": "org.matrix.msc3381.poll.start"
+    }
+   ],
+   "actions": [
+    "notify"
+   ],
+   "default": true,
+   "default_enabled": true
+  },
+  {
+   "rule_id": "global/underride/.org.matrix.msc3930.rule.poll_end_one_to_one",
+   "priority_class": 1,
+   "conditions": [
+    {
+     "kind": "room_member_count",
+     "is": "2"
+    },
+    {
+     "kind": "event_match",
+     "key": "type",
+     "pattern": "org.matrix.msc3381.poll.end"
+    }
+   ],
+   "actions": [
+    "notify",
+    {
+     "set_tweak": "sound",
+     "value": "default"
+    }
+   ],
+   "default": true,
+   "default_enabled": true
+  },
+  {
+   "rule_id": "global/underride/.org.matrix.msc3930.rule.poll_end",
+   "priority_class": 1,
+   "conditions": [
+    {
+     "kind": "event_match",
+     "key": "type",
+     "pattern": "org.matrix.msc3381.poll.end"
+    }
+   ],
+   "actions": [
+    "notify"
+   ],
+   "default": true,
+   "default_enabled": true
+  }
+ ]
+}
