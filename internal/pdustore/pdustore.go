@@ -430,6 +430,21 @@ const qCurrentState = `
 const qPrevsInTimeline = `
 	SELECT count(*) FROM events WHERE event_id = ANY($1) AND NOT outlier`
 
+const qPrevsReady = `
+	SELECT (SELECT count(*) FROM events WHERE event_id = ANY($1) AND NOT outlier),
+	       EXISTS (SELECT 1 FROM events WHERE event_id = $2)`
+
+// PrevsReady reports whether every prev event is in the timeline, and
+// whether the event itself has been persisted.
+func (s *Store) PrevsReady(ctx context.Context, eventID string, prevs []string) (ready, present bool, err error) {
+	u := uniqueIDs(prevs)
+	var n int
+	if err := s.pool.QueryRow(ctx, qPrevsReady, u, eventID).Scan(&n, &present); err != nil {
+		return false, false, fmt.Errorf("pdustore: prevs ready: %w", err)
+	}
+	return n == len(u), present, nil
+}
+
 const qRoomMaxStream = `SELECT COALESCE(max(stream_ordering), 0) FROM events WHERE room_id = $1`
 
 const qPartialState = `SELECT EXISTS (SELECT 1 FROM partial_state_rooms WHERE room_id = $1)`

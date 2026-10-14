@@ -20,15 +20,16 @@ import (
 // waits for Synapse to persist the event, then checks what we would have
 // decided against what Synapse did. It never forwards or writes anything.
 type Live struct {
-	v       *Verifier
-	st      *pdustore.Store
-	log     zerolog.Logger
-	queue   chan *job
-	maxWait time.Duration
-	onRes   func(string, *Result)
-	wg      sync.WaitGroup
-	ctx     context.Context
-	cancel  context.CancelFunc
+	v        *Verifier
+	st       *pdustore.Store
+	log      zerolog.Logger
+	queue    chan *job
+	maxWait  time.Duration
+	prevWait time.Duration
+	onRes    func(string, *Result)
+	wg       sync.WaitGroup
+	ctx      context.Context
+	cancel   context.CancelFunc
 }
 
 type job struct {
@@ -42,6 +43,7 @@ type job struct {
 	eventID  string
 	snap     *pdustore.Snapshot
 	skip     string // a reason not to check, if any
+	agree    string // a reason we and Synapse both ignore the PDU, if any
 	fail     string // an error preparing, if any
 }
 
@@ -55,6 +57,9 @@ type LiveOptions struct {
 	// MaxWait bounds waiting for Synapse to persist a PDU. A PDU whose
 	// prev events Synapse must fetch can take minutes. Zero uses 5m.
 	MaxWait time.Duration
+	// PrevWait bounds waiting for a PDU's prev events to be persisted
+	// before snapshotting its room. Zero uses 60s.
+	PrevWait time.Duration
 	// OnResult, when set, is called with every check's result. For tests.
 	OnResult func(check string, r *Result)
 }
@@ -70,8 +75,11 @@ func NewLive(v *Verifier, st *pdustore.Store, o LiveOptions, log zerolog.Logger)
 	if o.MaxWait <= 0 {
 		o.MaxWait = 5 * time.Minute
 	}
+	if o.PrevWait <= 0 {
+		o.PrevWait = time.Minute
+	}
 	ctx, cancel := context.WithCancel(context.Background())
-	l := &Live{v: v, st: st, log: log, queue: make(chan *job, o.Queue), maxWait: o.MaxWait, onRes: o.OnResult, ctx: ctx, cancel: cancel}
+	l := &Live{v: v, st: st, log: log, queue: make(chan *job, o.Queue), maxWait: o.MaxWait, prevWait: o.PrevWait, onRes: o.OnResult, ctx: ctx, cancel: cancel}
 	for i := 0; i < o.Concurrency; i++ {
 		l.wg.Add(1)
 		go l.work()
@@ -134,7 +142,7 @@ func (p *Pending) Discard() {}
 // room. Failures are recorded on the job and reported when it is checked.
 func (l *Live) prepare(j *job) {
 	defer close(j.snapDone)
-	ctx, cancel := context.WithTimeout(l.ctx, 30*time.Second)
+	ctx, cancel := context.WithTimeout(l.ctx, l.prevWait+30*time.Second)
 	defer cancel()
 
 	roomID := gjson.GetBytes(j.raw, "room_id")
@@ -146,8 +154,8 @@ func (l *Live) prepare(j *job) {
 	rvID, err := l.st.RoomVersion(ctx, roomID.Str)
 	if errors.Is(err, pdustore.ErrUnknownRoom) {
 		// Synapse ignores PDUs for rooms it does not know
-		// (federation_server.py:478); so do we.
-		j.skip = "unknown room"
+		// (federation_server.py:478); so do we. That is agreement.
+		j.agree = "unknown room"
 		return
 	}
 	if err != nil {
@@ -180,9 +188,56 @@ func (l *Live) prepare(j *job) {
 	if err != nil {
 		return
 	}
+	l.awaitPrevs(ctx, j.eventID, ev.PrevEvents)
 	snap, err := l.st.TakeSnapshot(ctx, j.roomID, j.eventID, ev.PrevEvents, types)
 	if err == nil {
 		j.snap = snap
+	}
+}
+
+// awaitPrevs waits, up to prevWait, until the event's prev events are in
+// Synapse's timeline -- or the event itself is persisted, or the wait ends.
+//
+// Synapse handles a room's PDUs one at a time, in order, so it reaches this
+// one only once the room's earlier PDUs are persisted: often the very prevs
+// still queued or being processed when the transaction arrived, sometimes
+// fetched from the sender first. A snapshot taken on arrival would see the
+// room before them, and find "missing prevs" Synapse never missed. Taken
+// once they are in, it sees the room as Synapse is about to.
+func (l *Live) awaitPrevs(ctx context.Context, eventID string, prevs []string) {
+	start := time.Now()
+	outcome := "timeout"
+	defer func() {
+		liveSnapshotWait.WithLabelValues(outcome).Observe(time.Since(start).Seconds())
+	}()
+	delay := 25 * time.Millisecond
+	for {
+		ready, present, err := l.st.PrevsReady(ctx, eventID, prevs)
+		switch {
+		case err != nil:
+			outcome = "error"
+			return
+		case present:
+			outcome = "event_persisted"
+			return
+		case ready:
+			outcome = "prevs_ready"
+			return
+		}
+		if time.Since(start)+delay > l.prevWait {
+			return
+		}
+		t := time.NewTimer(delay)
+		select {
+		case <-t.C:
+		case <-ctx.Done():
+			t.Stop()
+			outcome = "cancelled"
+			return
+		}
+		if delay < time.Second {
+			delay *= 2
+		}
 	}
 }
 
@@ -205,6 +260,9 @@ func (l *Live) check(j *job) {
 		return
 	}
 	switch {
+	case j.agree != "":
+		l.record("received", OutcomeMatch, j.agree)
+		return
 	case j.skip != "":
 		l.record("received", OutcomeSkipped, j.skip)
 		return
@@ -378,6 +436,11 @@ var (
 		Name: "goinbound_pdu_shadow_dropped_total",
 		Help: "PDUs not checked because the shadow queue was full.",
 	})
+	liveSnapshotWait = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "goinbound_pdu_shadow_snapshot_wait_seconds",
+		Help:    "Time a PDU's room snapshot waited for its prev events, by how the wait ended: prevs_ready, event_persisted (too late to snapshot), timeout, error.",
+		Buckets: []float64{.01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 30, 60},
+	}, []string{"outcome"})
 	liveWait = promauto.NewHistogram(prometheus.HistogramOpts{
 		Name:    "goinbound_pdu_shadow_persist_wait_seconds",
 		Help:    "Time from receiving a PDU to seeing Synapse persist it.",

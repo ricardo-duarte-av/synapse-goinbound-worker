@@ -236,9 +236,13 @@ content hashes and event IDs are checked with `pdusweep -sigs`: 9,000 stored
 events across v3-v12 all reproduce, apart from keys reissued under the same
 ID since.
 
-Soft-fail is checked too: before Synapse sees a transaction, the shadow
-snapshots each PDU's room (forward extremities, the current state for the
-event's auth types, whether its prevs are known). Once the event is
+Soft-fail is checked too. The shadow snapshots each PDU's room: forward
+extremities, the current state for the event's auth types, and whether its
+prevs are known. It waits until the PDU's prev events are persisted, up to
+`pdu_shadow.prev_wait_seconds`, because Synapse handles a room's PDUs one at
+a time and reaches this one only after them. A snapshot taken on arrival
+would see the room before PDUs still queued, and report "missing prevs"
+Synapse never had. Once the event is
 persisted, it reproduces `_check_for_soft_fail` from that snapshot and
 compares the verdict with Synapse's stored `soft_failed` flag. If any other
 event of the room was persisted between the snapshot and this one, the

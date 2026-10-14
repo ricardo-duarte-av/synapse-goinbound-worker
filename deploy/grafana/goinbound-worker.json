@@ -1601,8 +1601,8 @@
     },
     {
       "type": "timeseries",
-      "title": "PDU checker memory",
-      "description": "Resident memory, and the state group cache: its entries (~210 bytes each, bounded by pdu_shadow.state_cache_entries) and how groups were got. 'delta' is a group rebuilt from its cached prev group; 'full' a read of the whole group, 150k rows in a big room.",
+      "title": "PDU snapshot wait",
+      "description": "How long each PDU's room snapshot waited for its prev events to be persisted, by how the wait ended. 'event_persisted' means Synapse got there first and soft-fail/push skip it; 'timeout' means the prevs never arrived within prev_wait_seconds.",
       "id": 27,
       "datasource": {
         "type": "prometheus",
@@ -1610,6 +1610,81 @@
       },
       "gridPos": {
         "x": 0,
+        "y": 60,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (outcome) (rate(goinbound_pdu_shadow_snapshot_wait_seconds_count{job=~\"$job\"}[$bucket])) * 60",
+          "legendFormat": "per min {{outcome}}",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(goinbound_pdu_shadow_snapshot_wait_seconds_bucket{job=~\"$job\", outcome=\"prevs_ready\"}[$bucket])))",
+          "legendFormat": "p95 wait (s), prevs ready",
+          "range": true,
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "PDU checker memory",
+      "description": "Resident memory, and the state group cache: its entries (~210 bytes each, bounded by pdu_shadow.state_cache_entries) and how groups were got. 'delta' is a group rebuilt from its cached prev group; 'full' a read of the whole group, 150k rows in a big room.",
+      "id": 28,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 8,
         "y": 60,
         "w": 8,
         "h": 8
@@ -1688,7 +1763,7 @@
     {
       "type": "row",
       "title": "Synapse, for comparison",
-      "id": 28,
+      "id": 29,
       "collapsed": false,
       "gridPos": {
         "x": 0,
@@ -1702,7 +1777,7 @@
       "type": "timeseries",
       "title": "Synapse: EDUs received over replication, by writer",
       "description": "ReplicationFederationSendEduRestServlet on each Synapse instance: every EDU forwarded to it, from the Python worker or from us. Moving to native must not change this.",
-      "id": 29,
+      "id": 30,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1766,7 +1841,7 @@
       "type": "timeseries",
       "title": "Synapse: /send reaching the Python worker",
       "description": "FederationSendServlet on the Python inbound worker. Falls by ~96% once EDU-only transactions are native.",
-      "id": 30,
+      "id": 31,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1841,7 +1916,7 @@
       "type": "timeseries",
       "title": "Synapse: inbound EDUs and PDUs at the Python worker",
       "description": "What the Python worker still parses.",
-      "id": 31,
+      "id": 32,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1915,7 +1990,7 @@
     {
       "type": "row",
       "title": "Database",
-      "id": 32,
+      "id": 33,
       "collapsed": false,
       "gridPos": {
         "x": 0,
@@ -1929,7 +2004,7 @@
       "type": "timeseries",
       "title": "Queries by name and result",
       "description": "Every query is a primary-key lookup: txn_state once per native transaction, current_server_acl for typing and receipts (cached 5s per room), server_keys on a key-cache miss.",
-      "id": 33,
+      "id": 34,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1993,7 +2068,7 @@
       "type": "timeseries",
       "title": "Query latency (p99)",
       "description": "",
-      "id": 34,
+      "id": 35,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -2057,7 +2132,7 @@
       "type": "timeseries",
       "title": "ACL lookups by source",
       "description": "cached, db, error, redacted (a redacted ACL sends the transaction to Synapse).",
-      "id": 35,
+      "id": 36,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -2120,7 +2195,7 @@
     {
       "type": "row",
       "title": "Process: goinbound vs the Python inbound worker",
-      "id": 36,
+      "id": 37,
       "collapsed": false,
       "gridPos": {
         "x": 0,
@@ -2134,7 +2209,7 @@
       "type": "timeseries",
       "title": "CPU",
       "description": "Cores used.",
-      "id": 37,
+      "id": 38,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -2210,7 +2285,7 @@
       "type": "timeseries",
       "title": "Resident memory",
       "description": "",
-      "id": 38,
+      "id": 39,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -2285,7 +2360,7 @@
       "type": "timeseries",
       "title": "Goroutines and restarts",
       "description": "Goroutines should track request concurrency, not grow. A restart is a step in process_start_time_seconds.",
-      "id": 39,
+      "id": 40,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"

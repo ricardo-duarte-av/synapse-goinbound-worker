@@ -234,6 +234,7 @@ func buildHandler(ctx context.Context, cfg *config.Config, up *proxy.Proxy, log 
 			Concurrency: cfg.PDUShadow.Concurrency,
 			Queue:       cfg.PDUShadow.Queue,
 			MaxWait:     time.Duration(cfg.PDUShadow.MaxWaitSeconds) * time.Second,
+			PrevWait:    time.Duration(cfg.PDUShadow.PrevWaitSeconds) * time.Second,
 		}, log)
 		log.Info().Msg("PDU shadow on: PDUs Synapse accepts are checked once it has persisted them")
 	}

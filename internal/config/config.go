@@ -291,6 +291,10 @@ type PDUShadow struct {
 	MaxWaitSeconds int `yaml:"max_wait_seconds"`
 	// MaxConns bounds the PDU checker's own database pool. Zero uses 4.
 	MaxConns int `yaml:"max_conns"`
+	// PrevWaitSeconds bounds waiting for a PDU's prev events to be
+	// persisted before snapshotting its room for soft-fail and push.
+	// Zero uses 60.
+	PrevWaitSeconds int `yaml:"prev_wait_seconds"`
 	// StateCacheEntries bounds the state group cache, in state entries
 	// (about 210 bytes each). Zero uses 400000 (~85MB).
 	StateCacheEntries int `yaml:"state_cache_entries"`
