@@ -201,9 +201,16 @@ func (r *Result) fail(outcome, reason string) *Result {
 
 // checkEventAuth reproduces FederationEventHandler._check_event_auth
 // (federation_event.py:1830) for a fully stated room: rejected or not, and why.
-// Size limits are not checked; validate_event_for_room_version's signature
-// presence checks are.
+// validate_event_for_room_version comes first: the field size limits, then
+// the signature presence checks.
 func (s *Verifier) checkEventAuth(ctx context.Context, ev *pdu.Event, before pdu.StateMap) (bool, string, error) {
+	if se := pdu.CheckFieldSizes(ev); se != nil {
+		if se.Unpersistable {
+			// Synapse raises, and never stores the event.
+			return false, "", &pdu.RaiseError{Msg: "unpersistable: " + se.Msg}
+		}
+		return true, "oversized: " + se.Msg, nil
+	}
 	if why := validateSignatures(ev); why != "" {
 		return true, "validate: " + why, nil
 	}

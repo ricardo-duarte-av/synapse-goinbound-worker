@@ -313,6 +313,14 @@ func (l *Live) notPersisted(ctx context.Context, raw []byte, rv *pdu.RoomVersion
 	}
 	switch err := pdu.CheckSignatures(ev, raw, lookup); {
 	case err == nil:
+		if se := pdu.CheckPDUSize(raw); se != nil {
+			l.record("received", OutcomeMatch, "too large, not persisted")
+			return
+		}
+		if se := pdu.CheckFieldSizes(ev); se != nil && se.Unpersistable {
+			l.record("received", OutcomeMatch, "too large, not persisted")
+			return
+		}
 		l.record("received", OutcomeSkipped, "not persisted")
 		log.Debug().Msg("PDU shadow: Synapse has not persisted a PDU whose signatures verify")
 	case errors.Is(err, pdu.ErrKeyUnknown):
@@ -334,7 +342,7 @@ func reasonLabel(outcome, reason string) string {
 	}
 	for _, known := range []string{
 		"no room_id", "unknown room", "unsupported room version", "event id not computable", "no event id",
-		"room version lookup", "waiting for persistence", "malformed, not persisted", "not persisted, key unknown",
+		"room version lookup", "waiting for persistence", "malformed, not persisted", "too large, not persisted", "not persisted, key unknown",
 		"not persisted", "bad signature, not persisted", "signatures",
 		"outlier", "create event", "prev event without state group", "a prev's state was computed after the event's",
 		"no state group for the event", "state resolution v1", "signing key not held", "signing key replaced",

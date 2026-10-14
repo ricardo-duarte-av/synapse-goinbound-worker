@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -263,5 +264,33 @@ func TestThirdPartyInvite(t *testing.T) {
 	var re *RaiseError
 	if err := CheckStateDependentAuthRules(invite(good, "@alice:a.example"), []*Event{c, alice, badKey}); !errors.As(err, &re) {
 		t.Errorf("an undecodable public key: err = %v, want a raise", err)
+	}
+}
+
+// Shaped like the oversized_event rejections stored here: a member event
+// whose state key is under 255 codepoints but over 255 bytes.
+func TestFieldSizeLimits(t *testing.T) {
+	wide := strings.Repeat("é", 200) // 200 codepoints, 400 bytes
+	for _, tc := range []struct {
+		rv, stateKey  string
+		wantErr       bool
+		unpersistable bool
+	}{
+		{"6", wide, true, false},                    // lenient: persisted as rejected
+		{"11", wide, true, true},                    // strict byte limits: dropped
+		{"6", strings.Repeat("a", 256), true, true}, // codepoints: always strict
+		{"6", strings.Repeat("a", 255), false, false},
+	} {
+		ev := mkEvent(t, tc.rv, map[string]any{
+			"type": "m.room.member", "state_key": tc.stateKey, "sender": "@a:a.example",
+			"room_id": "!r:a.example", "content": map[string]any{"membership": "join"},
+		})
+		se := CheckFieldSizes(ev)
+		if (se != nil) != tc.wantErr || (se != nil && se.Unpersistable != tc.unpersistable) {
+			t.Errorf("v%s, %d-byte state key: %+v", tc.rv, len(tc.stateKey), se)
+		}
+	}
+	if CheckPDUSize([]byte(`{"content":{"body":"`+strings.Repeat("x", MaxPDUSize)+`"}}`)) == nil {
+		t.Error("a PDU over 64KiB passed")
 	}
 }

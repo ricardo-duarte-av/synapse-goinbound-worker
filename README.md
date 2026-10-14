@@ -220,9 +220,15 @@ What the replay skips, and why:
 - events where a prev's state group is newer than the event's own. Synapse
   then got that state from a remote, not from what is stored now.
 
-Not yet ported:
+Size limits (`_check_size_limits`) are ported too:
 
-- the size limits in `validate_event_for_room_version`.
+- **Fields:** sender, room ID, state key, type and event ID are limited to
+  255 codepoints (always strict) and 255 bytes. The byte limit is strict
+  only from v11. Below that, Synapse persists the event as
+  `oversized_event`; the 8 such rejections stored here are all v4-v6 member
+  events with long multibyte state keys.
+- **Whole PDU:** the 64 KiB limit applies only to PDUs Synapse drops, so the
+  live shadow checks it on those.
 
 State resolution uses Synapse's chain cover index, cross-checked against a
 plain DAG walk (`pdusweep -crosscheck`, 308 resolutions agreeing). Signatures,
