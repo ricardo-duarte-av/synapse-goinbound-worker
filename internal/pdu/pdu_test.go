@@ -1,6 +1,8 @@
 package pdu
 
 import (
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -192,5 +194,74 @@ func TestStringPowerLevelsByVersion(t *testing.T) {
 		if errors.As(err, &re) != tc.raise {
 			t.Errorf("v%s string ban level: err = %v, want raise=%v", tc.rv, err, tc.raise)
 		}
+	}
+}
+
+func TestThirdPartyInvite(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	pubB64 := base64.RawStdEncoding.EncodeToString(pub)
+
+	sign := func(signed map[string]any) map[string]any {
+		b, _ := json.Marshal(signed)
+		msg, err := signedMessage(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		signed["signatures"] = map[string]any{"id.example": map[string]any{
+			"ed25519:0": base64.RawStdEncoding.EncodeToString(ed25519.Sign(priv, msg)),
+		}}
+		return signed
+	}
+
+	c := create(t, "10", map[string]any{"creator": "@alice:a.example"})
+	alice := member(t, "10", "$ma:a.example", "@alice:a.example", "join")
+	tpiEvent := mkEvent(t, "10", map[string]any{
+		"event_id": "$tpi:a.example", "type": "m.room.third_party_invite", "state_key": "tok",
+		"sender": "@alice:a.example", "room_id": "!r:a.example",
+		"content": map[string]any{"public_key": pubB64, "display_name": "b..."},
+	})
+	invite := func(signed map[string]any, sender string) *Event {
+		return mkEvent(t, "10", map[string]any{
+			"event_id": "$inv:a.example", "type": "m.room.member", "state_key": "@bob:b.example",
+			"sender": sender, "room_id": "!r:a.example",
+			"content": map[string]any{"membership": "invite", "third_party_invite": map[string]any{
+				"display_name": "b...", "signed": signed}},
+		})
+	}
+	auth := []*Event{c, alice, tpiEvent}
+
+	good := sign(map[string]any{"mxid": "@bob:b.example", "token": "tok"})
+	if err := CheckStateDependentAuthRules(invite(good, "@alice:a.example"), auth); err != nil {
+		t.Errorf("a correctly signed third party invite was refused: %v", err)
+	}
+
+	tampered := sign(map[string]any{"mxid": "@bob:b.example", "token": "tok"})
+	tampered["mxid"] = "@mallory:b.example"
+	if err := CheckStateDependentAuthRules(invite(tampered, "@alice:a.example"), auth); !IsAuthError(err) {
+		t.Errorf("a tampered signed block: err = %v, want an auth failure", err)
+	}
+
+	// Signed by a key the invite does not publish.
+	_, other, _ := ed25519.GenerateKey(nil)
+	priv = other
+	forged := sign(map[string]any{"mxid": "@bob:b.example", "token": "tok"})
+	if err := CheckStateDependentAuthRules(invite(forged, "@alice:a.example"), auth); !IsAuthError(err) {
+		t.Errorf("a forged signature: err = %v, want an auth failure", err)
+	}
+
+	// The invite must come from whoever issued the third party invite.
+	if err := CheckStateDependentAuthRules(invite(good, "@carol:a.example"), auth); !IsAuthError(err) {
+		t.Errorf("a different sender: err = %v, want an auth failure", err)
+	}
+
+	// A public key that is not base64 raises out of the check in Synapse.
+	badKey := mkEvent(t, "10", map[string]any{
+		"event_id": "$tpi:a.example", "type": "m.room.third_party_invite", "state_key": "tok",
+		"sender": "@alice:a.example", "room_id": "!r:a.example",
+		"content": map[string]any{"public_key": "%%%"},
+	})
+	var re *RaiseError
+	if err := CheckStateDependentAuthRules(invite(good, "@alice:a.example"), []*Event{c, alice, badKey}); !errors.As(err, &re) {
+		t.Errorf("an undecodable public key: err = %v, want a raise", err)
 	}
 }

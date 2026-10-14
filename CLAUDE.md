@@ -101,6 +101,10 @@ things that are not derivable from the code.
   give the same links in a few round trips (2.6s for the whole resolution).
   For v2.1 with >1000 chains Synapse's own answer depends on Python set
   order; `goinbound_pdu_chain_link_batches` says how often that happens.
+- **Signing key lookups at ~0.24/s are normal** (measured 2026-10-14, after
+  warm-up from 1.3/s). Servers whose published key response has a short
+  validity drop out of the in-memory cache and are re-read from Synapse's
+  server_keys_json, one indexed lookup each. Auth failures stayed at ~1/hour.
 - **Keys get reissued under the same ID.** A signature failure where the key
   Synapse holds was stored after the event arrived is not evidence of anything.
 - **A failing content hash on a stored event is normal** when the event is

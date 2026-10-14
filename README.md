@@ -223,7 +223,6 @@ What the replay skips, and why:
 Not yet ported:
 
 - state resolution v1 (room version 1);
-- third-party invite signature checks;
 - the size limits in `validate_event_for_room_version`.
 
 State resolution uses Synapse's chain cover index, cross-checked against a

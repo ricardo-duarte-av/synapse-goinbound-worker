@@ -1,6 +1,7 @@
 package pdu
 
 import (
+	"crypto/ed25519"
 	"net/netip"
 	"regexp"
 	"sort"
@@ -401,10 +402,17 @@ func isMembershipChangeAllowed(rv *RoomVersion, ev *Event, auth AuthState) error
 	}
 
 	if membership == "invite" && has(ev.Content, "third_party_invite") {
-		// _verify_third_party_invite checks an ed25519 signature over the
-		// canonical JSON of the signed block. Not reproduced: such invites
-		// are rare enough to leave to Synapse.
-		return raise("third party invite verification is not implemented")
+		ok, err := verifyThirdPartyInvite(ev, auth)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return deny("you are not invited to this room")
+		}
+		if targetBanned {
+			return deny("%s is banned from the room", target)
+		}
+		return nil
 	}
 
 	if membership != "join" && membership != "knock" {
@@ -952,4 +960,142 @@ func UserLevelFromPowerLevels(pl *Event, userID string) (int64, error) {
 		return 0, nil
 	}
 	return intOf(level)
+}
+
+// verifyThirdPartyInvite is _verify_third_party_invite (event_auth.py:1171).
+//
+// Its control flow is reproduced exactly: for each public key of the
+// m.room.third_party_invite event, the FIRST ed25519 signature in the signed
+// block decides -- a failing one abandons that public key altogether (the
+// exception escapes both inner loops) -- and a public key that is not valid
+// base64 raises out of the auth check entirely.
+func verifyThirdPartyInvite(ev *Event, auth AuthState) (bool, error) {
+	tpi, ok := field(ev.Content, "third_party_invite")
+	if !ok || !tpi.IsObject() {
+		return false, nil
+	}
+	signed, ok := field(tpi, "signed")
+	if !ok || !signed.IsObject() {
+		return false, nil
+	}
+	for _, k := range []string{"mxid", "token", "signatures"} {
+		if !has(signed, k) {
+			return false, nil
+		}
+	}
+	token, _ := field(signed, "token")
+	if token.Type != gjson.String {
+		// A non-string token cannot name a state key here.
+		return false, raise("third_party_invite token is not a string")
+	}
+	invite := auth[StateKey{Type: "m.room.third_party_invite", StateKey: token.Str}]
+	if invite == nil || invite.Sender != ev.Sender {
+		return false, nil
+	}
+	mxid, _ := field(signed, "mxid")
+	if ev.StateKey == nil || !pyEqualString(mxid, *ev.StateKey) {
+		return false, nil
+	}
+
+	keys, err := publicKeys(invite)
+	if err != nil {
+		return false, err
+	}
+	sigs, _ := field(signed, "signatures")
+	message, err := signedMessage([]byte(signed.Raw))
+	if err != nil {
+		return false, err
+	}
+	for _, pk := range keys {
+		// try: ... except (KeyError, SignatureVerifyException): continue
+		raw, ok := field(pk, "public_key")
+		if !ok {
+			continue // KeyError
+		}
+		if raw.Type != gjson.String {
+			return false, raise("public_key is not a string")
+		}
+		keyBytes, err := decodeUnpaddedBase64(raw.Str)
+		if err != nil {
+			// binascii.Error is not caught.
+			return false, raise("public_key is not base64")
+		}
+		if !sigs.IsObject() {
+			return false, raise("signatures is not a mapping")
+		}
+		verified, abandon, notDict := false, false, false
+		sigs.ForEach(func(server, block gjson.Result) bool {
+			if !block.IsObject() {
+				notDict = true // .keys() on a non-dict raises, uncaught
+				return false
+			}
+			block.ForEach(func(keyName, sig gjson.Result) bool {
+				if !strings.HasPrefix(keyName.String(), "ed25519:") {
+					return true
+				}
+				// verify_signed_json(signed, server, verify_key): the
+				// signature for this key name must exist and verify.
+				sb, err := decodeUnpaddedBase64(sig.String())
+				if err != nil || sig.Type != gjson.String || len(keyBytes) != 32 ||
+					!ed25519Verify(keyBytes, message, sb) {
+					abandon = true
+					return false
+				}
+				verified = true
+				return false
+			})
+			return !verified && !abandon
+		})
+		if notDict {
+			return false, raise("a signature block is not a mapping")
+		}
+		if verified {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// publicKeys is get_public_keys (event_auth.py:1242).
+func publicKeys(invite *Event) ([]gjson.Result, error) {
+	var out []gjson.Result
+	if v, ok := field(invite.Content, "public_key"); ok {
+		obj := `{"public_key":` + v.Raw
+		if u, ok := field(invite.Content, "key_validity_url"); ok {
+			obj += `,"key_validity_url":` + u.Raw
+		}
+		out = append(out, gjson.Parse(obj+"}"))
+	}
+	list := get(invite.Content, "public_keys")
+	switch {
+	case isNone(list):
+		if v, ok := field(invite.Content, "public_keys"); ok && v.Type == gjson.Null {
+			return nil, raise("public_keys is None")
+		}
+	case list.IsArray():
+		for _, e := range list.Array() {
+			if !e.IsObject() {
+				// public_key_object["public_key"] on a non-dict.
+				return nil, raise("public_keys entry is not an object")
+			}
+			out = append(out, e)
+		}
+	default:
+		return nil, raise("public_keys is not a list")
+	}
+	return out, nil
+}
+
+// signedMessage is what verify_signed_json checks a signature over: the
+// object without signatures and unsigned, canonicalized.
+func signedMessage(raw []byte) ([]byte, error) {
+	m, err := without(raw, "signatures", "unsigned")
+	if err != nil {
+		return nil, err
+	}
+	return Canonical(m)
+}
+
+func ed25519Verify(key, message, sig []byte) bool {
+	return ed25519.Verify(ed25519.PublicKey(key), message, sig)
 }
