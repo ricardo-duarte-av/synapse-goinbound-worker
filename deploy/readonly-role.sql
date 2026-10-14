@@ -55,6 +55,7 @@ GRANT SELECT ON
     server_keys_json,
     server_signature_keys,
     state_group_edges,
+    state_groups,
     state_groups_state,
     thread_subscriptions
 TO goinbound_ro;

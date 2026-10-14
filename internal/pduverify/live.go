@@ -328,14 +328,24 @@ func (l *Live) check(j *job) {
 		return l.v.SoftFail(ctx, id, j.snap)
 	}
 	var before pdu.StateMap
+	var replayed *Result
 	replay := func(ctx context.Context, id string) *Result {
 		r := l.v.Replay(ctx, id)
 		if r.Outcome == OutcomeMatch {
-			// Push reads the state before from Replay, when it agrees
-			// with Synapse's.
-			before = r.Before()
+			// Push and the state group check build on Replay, when it
+			// agrees with Synapse.
+			before, replayed = r.Before(), r
 		}
 		return r
+	}
+	stateGroups := func(ctx context.Context, id string) *Result {
+		if replayed == nil {
+			return &Result{EventID: id, Outcome: OutcomeSkipped, Reason: "state_auth did not match"}
+		}
+		// Prevs the snapshot saw in the timeline were there when Synapse
+		// computed the event's context: it waited for them first.
+		held := j.snap != nil && j.snap.PrevsInTimeline && !j.snap.EventPresent
+		return l.v.StateGroups(ctx, replayed, held)
 	}
 	pushCheck := func(ctx context.Context, id string) *Result {
 		if j.snap == nil {
@@ -347,7 +357,7 @@ func (l *Live) check(j *job) {
 	for _, c := range []struct {
 		name string
 		run  func(context.Context, string) *Result
-	}{{"signatures", l.v.CheckSigs}, {"state_auth", replay}, {"soft_fail", softFail}, {"push", pushCheck}} {
+	}{{"signatures", l.v.CheckSigs}, {"state_auth", replay}, {"state_groups", stateGroups}, {"soft_fail", softFail}, {"push", pushCheck}} {
 		res := c.run(ctx, eventID)
 		res.EventID = eventID
 		l.recordResult(c.name, res)
@@ -445,6 +455,8 @@ func reasonLabel(outcome, reason string) string {
 		"room version lookup", "waiting for persistence", "malformed, not persisted", "too large, not persisted", "not persisted, key unknown",
 		"not persisted", "bad signature, not persisted", "signatures", "still queued by Synapse",
 		"not in room", "not in room, invite rescission", "host joined lookup",
+		"state_auth did not match", "no replay", "tie", "resolution cached by Synapse", "group after stored in full",
+		"stored in full: prevs may have been missing", "group before", "group after",
 		"outlier", "create event", "prev event without state group", "a prev's state was computed after the event's",
 		"no state group for the event", "state resolution v1", "signing key not held", "signing key replaced",
 		"rejected", "partial state room", "snapshot taken after the event", "backfilled", "missing prevs", "race",

@@ -26,7 +26,7 @@ var Tables = []string{
 	"event_to_state_groups", "state_groups_state", "state_group_edges", "event_edges",
 	"event_auth_chains", "event_auth_chain_links", "server_signature_keys", "redactions",
 	"event_forward_extremities", "current_state_events", "partial_state_rooms",
-	"federation_inbound_events_staging",
+	"federation_inbound_events_staging", "state_groups",
 	// The push check.
 	"local_current_membership", "room_memberships", "push_rules", "push_rules_enable",
 	"ignored_users", "event_relations", "thread_subscriptions", "room_depth", "event_push_actions", "receipts_linearized",
@@ -260,6 +260,38 @@ const qDisableSeqscan = `SET LOCAL enable_seqscan = off`
 const qStateEdge = `SELECT prev_state_group FROM state_group_edges WHERE state_group = $1`
 
 const qStateDeltaRows = `SELECT type, state_key, event_id FROM state_groups_state WHERE state_group = $1`
+
+const qStateGroupEvent = `SELECT event_id FROM state_groups WHERE id = $1`
+
+// StateGroupEvent is the event a state group was stored for: Synapse
+// stores a new group under the event whose context needed it.
+func (s *Store) StateGroupEvent(ctx context.Context, group int64) (string, error) {
+	var id string
+	if err := s.pool.QueryRow(ctx, qStateGroupEvent, group).Scan(&id); err != nil {
+		return "", fmt.Errorf("pdustore: state group event: %w", err)
+	}
+	return id, nil
+}
+
+// qStateHops is _count_state_group_hops_txn's query: the group and every
+// group its delta chain builds on.
+const qStateHops = `WITH RECURSIVE state(state_group) AS (
+		VALUES($1::bigint)
+		UNION ALL
+		SELECT prev_state_group FROM state_group_edges e, state s
+		WHERE s.state_group = e.state_group
+	)
+	SELECT count(*) FROM state`
+
+// StateHops is the length of a group's delta chain, the group included, as
+// Synapse counts it. A group built on one with 100 or more is stored in full.
+func (s *Store) StateHops(ctx context.Context, group int64) (int, error) {
+	var n int
+	if err := s.pool.QueryRow(ctx, qStateHops, group).Scan(&n); err != nil {
+		return 0, fmt.Errorf("pdustore: state hops: %w", err)
+	}
+	return n, nil
+}
 
 // StateDelta is one link of a group's delta chain: the group it builds on
 // (hasPrev false for a group stored in full) and its own rows, which override

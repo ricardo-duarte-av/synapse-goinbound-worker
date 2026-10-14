@@ -21,7 +21,15 @@ things that are not derivable from the code.
 
 ## Decisions that are easy to undo by accident
 
-- **No writes to Synapse's data, ever.** `TestEveryQueryIsASelect` enforces it.
+- **The goal is retiring the Python inbound worker(s)** (operator,
+  2026-10-14). "Keep PDUs on Python" is not an end state, so the PDU path,
+  remote fetching included, must eventually be Go's.
+- **Whatever a persister or writer can persist, it persists.** Writes go over
+  replication (`fed_send_events`, `fed_send_edu`). Only what Synapse's own
+  inbound worker writes directly (staging, `worker_locks`, state groups,
+  `event_push_actions_staging`, `event_failed_pull_attempts`) may be written
+  by us, from write mode only, through a role granted exactly those tables.
+- **Until write mode: no writes to Synapse's data.** `TestEveryQueryIsASelect` enforces it.
   A write, even to `received_transactions` or `destinations`, skips the caches
   and streams Synapse keeps in step with its tables. The one exception is the
   role itself: `internal/dbrole` creates or repairs `goinbound_ro` at
@@ -125,6 +133,16 @@ things that are not derivable from the code.
 
   The push check allows for all three. Before them, 98% of its "mismatches"
   were missing stored rows.
+- **State groups are the inbound worker's own writes**, so write mode must
+  make the same ones (`state_groups` check). The first sweep showed 4% of
+  resolved events tie on "smallest delta" or on two exact matches; Synapse
+  breaks them by Python set order, which `pySetOrder` simulates (CPython
+  3.13: slot = id & mask, 9 linear probes, perturb, resize at 3/5 full,
+  and `set(set)` copies). The insertion order is a frozenset of event IDs,
+  random per process, so only colliding slots are real ties (~0.3%).
+- **Matrix HQ's missing prevs store full groups**: ~13.6k rows each, 364
+  in one day (2026-10-14). Synapse's missing-prevs path passes the
+  fetched state as `state_ids_before_event`, which never becomes a delta.
 - **homeserver.yaml has duplicate keys** (`msc3814_enabled` twice).
   PyYAML keeps the last one; yaml.v3 refuses the whole file, so
   `experimental_features` is decoded by hand (`lastWins`).

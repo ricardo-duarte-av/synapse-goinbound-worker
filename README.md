@@ -257,6 +257,25 @@ is `still queued by Synapse` if it is in `federation_inbound_events_staging`
 (the room's queue is behind, usually fetching missing prevs), and
 `not persisted` if Synapse dropped it.
 
+State groups are checked after state and auth, for write mode: they are
+rows the inbound worker stores itself before handing the event to the
+persister. When the state matched, the shadow works out which group
+Synapse should have used for the state before: the prev's group when
+there is one, an exact match among the prevs' groups, or a new group on
+the one needing the smallest delta (in full when that chain is 100 hops
+long, or when no group can be built on). It checks the stored group's
+shape: which group, built on which, with which rows, and for a state event
+a new group after it with the event as its one row. Synapse breaks ties in
+the order it iterates a Python set of group IDs, which `pySetOrder`
+reproduces (tested against the Python in the Synapse image); it is a `tie`
+only when the random order event IDs were added in could change it. A
+group Synapse stored for another event with the same prevs is `resolution
+cached by Synapse` (its hour-long `_state_cache`). A full group where a
+reuse or delta was possible is the missing-prevs path, state from a
+remote's `/state_ids`; the live check counts it as a mismatch only when its
+snapshot saw every prev in the timeline. `pdusweep -groups` runs it on
+history.
+
 Push actions are checked last. The shadow reproduces
 `BulkPushRuleEvaluator._action_for_event_by_user` against each user's push
 rules (`internal/push`, a port of Synapse's Rust evaluator, with the base

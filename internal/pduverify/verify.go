@@ -46,8 +46,23 @@ type Result struct {
 	PushRows   int `json:"push_rows,omitempty"`
 	PushNotify int `json:"push_notify,omitempty"`
 
+	// GroupPlan is what the state group check expected Synapse to store.
+	GroupPlan string `json:"group_plan,omitempty"`
+
 	// before is Replay's state before the event, for the push check.
 	before pdu.StateMap
+	// replay is what the state group check needs from Replay.
+	replay *replayed
+}
+
+// replayed is Replay's working, kept for the state group check.
+type replayed struct {
+	ev       *pdu.Event
+	ownGroup int64
+	// groups are the prevs' distinct state groups, in prev order, and
+	// sets their states.
+	groups []int64
+	sets   []pdu.StateMap
 }
 
 // Before is the state before the event, when Replay computed it.
@@ -104,6 +119,7 @@ func (s *Verifier) Replay(ctx context.Context, id string) *Result {
 	// 1. State after each prev event, deduplicated by state group as
 	// Synapse does before resolving.
 	var sets []pdu.StateMap
+	var groups []int64
 	seen := map[int64]bool{}
 	for _, p := range ev.PrevEvents {
 		g, err := s.st.StateGroupForEvent(ctx, p)
@@ -132,6 +148,7 @@ func (s *Verifier) Replay(ctx context.Context, id string) *Result {
 			return res.fail(OutcomeError, err.Error())
 		}
 		sets = append(sets, m)
+		groups = append(groups, g)
 	}
 
 	// 2. The state before the event.
@@ -166,6 +183,7 @@ func (s *Verifier) Replay(ctx context.Context, id string) *Result {
 	}
 	res.OurRej, res.OurReason = rej, why
 	res.before = before
+	res.replay = &replayed{ev: ev, ownGroup: ownGroup, groups: groups, sets: sets}
 
 	// 4. State after, against Synapse's.
 	stored, err := s.groups.get(ctx, s.st, ownGroup)

@@ -52,6 +52,7 @@ func main() {
 	idsFile := flag.String("ids", "", "replay the event IDs in this file (one per line) instead of sampling")
 	sigs := flag.Bool("sigs", false, "check event IDs, content hashes and signatures instead of auth and state")
 	pushFlag := flag.Bool("push", false, "check push actions against event_push_actions instead of auth and state (recent events: rows are pruned after a day or so)")
+	groupsFlag := flag.Bool("groups", false, "check the shape of the state groups Synapse stored (reused, or built on which group with which delta) instead of auth and state")
 	homeserver := flag.String("homeserver", "/opt/matrix/synapse/synapse/homeserver.yaml", "homeserver.yaml, for -push")
 	flag.Parse()
 
@@ -71,6 +72,15 @@ func main() {
 	check := sw.Replay
 	if *sigs {
 		check = sw.CheckSigs
+	}
+	if *groupsFlag {
+		check = func(ctx context.Context, id string) *pduverify.Result {
+			r := sw.Replay(ctx, id)
+			if r.Outcome != pduverify.OutcomeMatch {
+				return r
+			}
+			return sw.StateGroups(ctx, r, false)
+		}
 	}
 	if *pushFlag {
 		hs, err := synapsecfg.Load(*homeserver)
