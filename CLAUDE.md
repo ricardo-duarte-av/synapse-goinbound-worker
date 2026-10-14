@@ -51,6 +51,11 @@ things that are not derivable from the code.
   parallel. This is slightly stricter than Synapse, on purpose.
 - **Auth failures are proxied, never answered.** Python gives the
   authoritative 401, or verifies something we couldn't.
+- **Modes are per payload, and both are required** (`modes.edu`,
+  `modes.pdu`). The operator asked for explicit over implicit: nothing is
+  proxied "because that is the default". `modes.pdu` accepts only `proxy`
+  until a PDU path exists. The old `mode:` key fails with the replacement
+  spelled out.
 - **Canary is per origin**, so one origin's transactions never run in two
   processes at once.
 

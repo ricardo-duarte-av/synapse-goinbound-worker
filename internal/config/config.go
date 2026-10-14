@@ -89,6 +89,17 @@ func (m Mode) String() string {
 // ServesNatively reports whether any transaction can be answered by us.
 func (m Mode) ServesNatively() bool { return m.Kind == ModeCanary || m.Kind == ModeNative }
 
+// Modes is the serving mode of each kind of payload.
+type Modes struct {
+	// EDU is how EDU-only transactions are served: proxy, shadow, canary:N
+	// or native.
+	EDU Mode `yaml:"edu"`
+	// PDU is how transactions carrying any PDU are served. Only proxy exists:
+	// this worker has no PDU pipeline, so every such transaction goes to the
+	// Python worker whole, its EDUs included.
+	PDU Mode `yaml:"pdu"`
+}
+
 // Config is the top-level worker configuration.
 type Config struct {
 	// HomeserverYAML is Synapse's homeserver.yaml, mounted read-only.
@@ -103,9 +114,14 @@ type Config struct {
 	EDU      EDU      `yaml:"edu"`
 	Shadow   Shadow   `yaml:"shadow"`
 
-	// Mode is how EDU-only transactions are served. Transactions carrying a
-	// PDU are always proxied: this worker has no PDU pipeline.
-	Mode Mode `yaml:"mode"`
+	// Modes says, per kind of payload, whether it is proxied, shadowed or
+	// served here. Both are required: what goes where is spelled out, never
+	// implied.
+	Modes Modes `yaml:"modes"`
+
+	// LegacyMode is the old single `mode:` key, kept only to refuse it with
+	// a message that says what to write instead.
+	LegacyMode *string `yaml:"mode"`
 
 	// MaxBodyMB bounds a transaction body we buffer. Synapse caps a
 	// transaction at 50 PDUs and 100 EDUs, and a PDU at 64KiB, so a
@@ -276,7 +292,6 @@ func parse(data []byte) (*Config, error) {
 		Listen:         Listen{SocketMode: "0660"},
 		Metrics:        Metrics{Addr: ":9200"},
 		Log:            Log{Level: "info"},
-		Mode:           Mode{Kind: ModeProxy},
 	}
 
 	dec := yaml.NewDecoder(strings.NewReader(string(data)))
@@ -326,8 +341,18 @@ func (c *Config) validate() error {
 			return fmt.Errorf("%s must not be negative", n.name)
 		}
 	}
-	if c.Mode.Kind == "" {
-		c.Mode.Kind = ModeProxy
+	if c.LegacyMode != nil {
+		return fmt.Errorf("the `mode:` key is gone; say what each payload does instead:\n"+
+			"  modes:\n    edu: %s   # proxy | shadow | canary:N | native\n    pdu: proxy", *c.LegacyMode)
+	}
+	if c.Modes.EDU.Kind == "" {
+		return fmt.Errorf("modes.edu is required: one of proxy, shadow, canary:N, native")
+	}
+	if c.Modes.PDU.Kind == "" {
+		return fmt.Errorf("modes.pdu is required; the only mode implemented is proxy")
+	}
+	if c.Modes.PDU.Kind != ModeProxy {
+		return fmt.Errorf("modes.pdu is %s, but this worker has no PDU pipeline yet; the only mode implemented is proxy", c.Modes.PDU)
 	}
 	return nil
 }

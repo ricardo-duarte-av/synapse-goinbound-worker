@@ -63,6 +63,15 @@ R = "[$bucket]"
 
 # ---------------------------------------------------------------- Overview
 row("Overview")
+panels.append({"type": "stat", "title": "Modes", "id": nid(), "datasource": DS,
+               "description": "What each kind of payload does, from modes.edu and modes.pdu in goinbound-worker.yaml.",
+               "gridPos": place(24, 3),
+               "fieldConfig": {"defaults": {"color": {"mode": "fixed", "fixedColor": "text"}}, "overrides": []},
+               "options": {"colorMode": "none", "graphMode": "none", "justifyMode": "center", "orientation": "vertical",
+                           "textMode": "name", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": False}},
+               "targets": targets([(f'max by (payload, mode, canary_percent) (goinbound_mode{{{G}}} == 1)',
+                                    "{{payload}}: {{mode}} (canary {{canary_percent}}%)")])})
+flush()
 stat("Transactions/s", "Every /send this worker received, whatever it did with it.",
      [(f'sum(rate(goinbound_requests_total{{{G}}}{R}))', "req/s")], unit="reqps", decimals=2)
 stat("Answered natively", "Share of transactions answered here instead of by the Python worker. About 96% is the ceiling on this homeserver; 0 in proxy and shadow mode.",

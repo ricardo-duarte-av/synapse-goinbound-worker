@@ -148,7 +148,7 @@ func newRig(t *testing.T, mode config.Mode) *rig {
 	})
 	proc := edu.NewProcessor(router, allowAll{}, r.sender, false, zerolog.Nop())
 	r.h = NewHandler(Options{
-		Mode:           mode,
+		EDUMode:        mode,
 		Verifier:       r.verifier,
 		Upstream:       r.up,
 		Store:          r.store,

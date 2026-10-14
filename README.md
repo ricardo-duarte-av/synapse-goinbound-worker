@@ -52,15 +52,29 @@ Everything below is read from Synapse's source and cited in the code:
 
 ## Modes
 
-Set by `mode:` in `goinbound-worker.yaml`. They follow the same path as the
-gopro worker:
+Each kind of payload has its own mode in `goinbound-worker.yaml`, and both are
+required, so what is proxied, shadowed or served here is always spelled out:
+
+```yaml
+modes:
+  edu: shadow   # transactions carrying only EDUs
+  pdu: proxy    # transactions carrying any PDU
+```
+
+`modes.edu` follows the same path as the gopro worker:
 
 | Mode | Behaviour |
 |---|---|
-| `proxy` | Forward every request untouched. Nothing is parsed, verified or read. Safe first deploy. |
-| `shadow` | Forward every request, then evaluate afterwards what native mode would have done. Counts only; nothing is forwarded. |
-| `canary:N` | Serve EDU-only transactions natively for N% of **origins**. Each origin stays on one path. |
-| `native` | Serve every eligible EDU-only transaction natively. |
+| `proxy` | Forward untouched. With `pdu: proxy` too, nothing is parsed, verified or read. Safe first deploy. |
+| `shadow` | Forward, then evaluate afterwards what native mode would have done. Counts only; nothing is forwarded. |
+| `canary:N` | Serve natively for N% of **origins**. Each origin stays on one path. |
+| `native` | Serve natively whenever possible. Anything uncertain is still forwarded. |
+
+`modes.pdu` accepts only `proxy`: there is no PDU pipeline. A transaction with
+any PDU goes to the Python worker whole, its EDUs included, whatever
+`modes.edu` says. The old single `mode:` key is refused, with a message giving
+the replacement. The modes in force are exported as `goinbound_mode` and shown
+at the top of the dashboard.
 
 ## Configuration
 

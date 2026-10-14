@@ -79,8 +79,10 @@ func run(cfg *config.Config, log zerolog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	log.Info().Str("version", tag).Str("commit", commit).Stringer("mode", cfg.Mode).
+	log.Info().Str("version", tag).Str("commit", commit).
+		Stringer("edu_mode", cfg.Modes.EDU).Stringer("pdu_mode", cfg.Modes.PDU).
 		Msg("Starting goinbound-worker")
+	txn.RecordModes(cfg.Modes)
 
 	up, err := proxy.New(cfg.Upstream, log)
 	if err != nil {
@@ -147,13 +149,13 @@ func run(cfg *config.Config, log zerolog.Logger) error {
 // homeserver.yaml or the database is not reachable from here yet.
 func buildHandler(ctx context.Context, cfg *config.Config, up *proxy.Proxy, log zerolog.Logger) (*txn.Handler, func(), error) {
 	noop := func() {}
-	if cfg.Mode.Kind == config.ModeProxy {
+	if cfg.Modes.EDU.Kind == config.ModeProxy {
 		if hs, err := synapsecfg.Load(cfg.HomeserverYAML); err != nil {
 			log.Warn().Err(err).Msg("Cannot read homeserver.yaml; fine in proxy mode, required for any other")
 		} else {
 			log.Info().Str("server_name", hs.ServerName).Msg("Read homeserver.yaml")
 		}
-		return txn.NewHandler(txn.Options{Mode: cfg.Mode, Upstream: up, Log: log}), noop, nil
+		return txn.NewHandler(txn.Options{EDUMode: cfg.Modes.EDU, Upstream: up, Log: log}), noop, nil
 	}
 
 	hs, err := synapsecfg.Load(cfg.HomeserverYAML)
@@ -186,7 +188,7 @@ func buildHandler(ctx context.Context, cfg *config.Config, up *proxy.Proxy, log 
 		return nil, noop, err
 	}
 	var sender edu.Sender
-	if cfg.Mode.ServesNatively() {
+	if cfg.Modes.EDU.ServesNatively() {
 		sender = repl
 	}
 	processor := edu.NewProcessor(router, acl.NewChecker(db, 0), sender, hs.TrackPresence, log)
@@ -204,7 +206,7 @@ func buildHandler(ctx context.Context, cfg *config.Config, up *proxy.Proxy, log 
 		Msg("EDU routing from homeserver.yaml")
 
 	h := txn.NewHandler(txn.Options{
-		Mode:            cfg.Mode,
+		EDUMode:         cfg.Modes.EDU,
 		Verifier:        verifier,
 		Upstream:        up,
 		Store:           db,

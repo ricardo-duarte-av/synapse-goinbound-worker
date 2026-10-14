@@ -7,14 +7,21 @@
 # Synapse's config, mounted read-only.
 homeserver_yaml: /etc/synapse/homeserver.yaml
 
-# How EDU-only /send transactions are served. Transactions with PDUs always go
-# to the Python worker.
+# What happens to each kind of payload. Both are required.
 #
-#   proxy     forward everything untouched (the first deploy: changes nothing)
-#   shadow    forward everything, then count what native would have done
-#   canary:N  serve EDU-only transactions natively for N% of origins
-#   native    serve every eligible EDU-only transaction natively
-mode: proxy
+# edu: transactions carrying only EDUs.
+#   proxy     forward to the Python worker untouched (with pdu: proxy, this
+#             worker changes nothing at all)
+#   shadow    forward, then count what native would have done
+#   canary:N  serve natively for N% of origins, forward the rest
+#   native    serve natively whenever possible; anything uncertain is still
+#             forwarded
+#
+# pdu: transactions carrying any PDU. They go to the Python worker whole,
+#   their EDUs included. Only proxy exists: there is no PDU pipeline yet.
+modes:
+  edu: proxy
+  pdu: proxy
 
 # nginx connects here.
 listen:

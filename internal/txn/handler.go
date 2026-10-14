@@ -53,7 +53,9 @@ type EDUs interface {
 
 // Options builds a Handler.
 type Options struct {
-	Mode     config.Mode
+	// EDUMode is how EDU-only transactions are served. Transactions with
+	// PDUs are always proxied (modes.pdu: proxy is the only PDU mode).
+	EDUMode  config.Mode
 	Verifier Verifier
 	Upstream Upstream
 	Store    TxnStore
@@ -88,7 +90,7 @@ const responseCacheTTL = 30 * time.Second
 // mode, which uses none of them.
 func NewHandler(o Options) *Handler {
 	h := &Handler{
-		mode:           o.Mode,
+		mode:           o.EDUMode,
 		verifier:       o.Verifier,
 		upstream:       o.Upstream,
 		store:          o.Store,

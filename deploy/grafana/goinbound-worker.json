@@ -149,16 +149,68 @@
     },
     {
       "type": "stat",
+      "title": "Modes",
+      "id": 2,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "What each kind of payload does, from modes.edu and modes.pdu in goinbound-worker.yaml.",
+      "gridPos": {
+        "x": 0,
+        "y": 1,
+        "w": 24,
+        "h": 3
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "text"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "vertical",
+        "textMode": "name",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "max by (payload, mode, canary_percent) (goinbound_mode{job=~\"$job\"} == 1)",
+          "legendFormat": "{{payload}}: {{mode}} (canary {{canary_percent}}%)",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
       "title": "Transactions/s",
       "description": "Every /send this worker received, whatever it did with it.",
-      "id": 2,
+      "id": 3,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 0,
-        "y": 1,
+        "y": 4,
         "w": 4,
         "h": 4
       },
@@ -213,14 +265,14 @@
       "type": "stat",
       "title": "Answered natively",
       "description": "Share of transactions answered here instead of by the Python worker. About 96% is the ceiling on this homeserver; 0 in proxy and shadow mode.",
-      "id": 3,
+      "id": 4,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 4,
-        "y": 1,
+        "y": 4,
         "w": 4,
         "h": 4
       },
@@ -275,14 +327,14 @@
       "type": "stat",
       "title": "Would answer natively",
       "description": "Shadow mode: share of evaluated transactions native mode would have answered.",
-      "id": 4,
+      "id": 5,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 8,
-        "y": 1,
+        "y": 4,
         "w": 4,
         "h": 4
       },
@@ -337,14 +389,14 @@
       "type": "stat",
       "title": "Shadow disagreements (window)",
       "description": "Transactions we would have answered 200 that Synapse answered otherwise. A 429 is usually Synapse refusing a concurrent transaction, which our own claim would refuse too; anything else deserves a look in the logs.",
-      "id": 5,
+      "id": 6,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 12,
-        "y": 1,
+        "y": 4,
         "w": 4,
         "h": 4
       },
@@ -403,14 +455,14 @@
       "type": "stat",
       "title": "Forward failures (window)",
       "description": "EDUs that could not be handed to their stream writer. Each fails its transaction with a 500, and the sender retries.",
-      "id": 6,
+      "id": 7,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 16,
-        "y": 1,
+        "y": 4,
         "w": 4,
         "h": 4
       },
@@ -469,14 +521,14 @@
       "type": "stat",
       "title": "Upstream unreachable (window)",
       "description": "Requests the Python inbound worker could not be reached for.",
-      "id": 7,
+      "id": 8,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 20,
-        "y": 1,
+        "y": 4,
         "w": 4,
         "h": 4
       },
@@ -534,11 +586,11 @@
     {
       "type": "row",
       "title": "Routing",
-      "id": 8,
+      "id": 9,
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 5,
+        "y": 8,
         "w": 24,
         "h": 1
       },
@@ -548,14 +600,14 @@
       "type": "timeseries",
       "title": "Transactions by route and reason",
       "description": "Where each transaction went (native, proxy, abandoned) and why. Proxy reasons: mode_proxy/mode_shadow (the mode), has_pdus, malformed, limits, auth_failed, origin_in_backoff, canary_not_selected, uncertain, db_error, too_large, not_send.",
-      "id": 9,
+      "id": 10,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 0,
-        "y": 6,
+        "y": 9,
         "w": 12,
         "h": 8
       },
@@ -612,14 +664,14 @@
       "type": "timeseries",
       "title": "Latency by route",
       "description": "Time to answer, by route. Proxied latency is mostly the Python worker's.",
-      "id": 10,
+      "id": 11,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 12,
-        "y": 6,
+        "y": 9,
         "w": 12,
         "h": 8
       },
@@ -686,11 +738,11 @@
     {
       "type": "row",
       "title": "EDUs",
-      "id": 11,
+      "id": 12,
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 14,
+        "y": 17,
         "w": 24,
         "h": 1
       },
@@ -700,14 +752,14 @@
       "type": "timeseries",
       "title": "EDUs by type and action",
       "description": "Every EDU decided, natively or in shadow: forwarded, dropped as untracked presence, or dropped by a room's server ACL. edu_type=\"other\" is a type Synapse has no handler for; the log names the first of each.",
-      "id": 12,
+      "id": 13,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 0,
-        "y": 15,
+        "y": 18,
         "w": 12,
         "h": 8
       },
@@ -764,14 +816,14 @@
       "type": "timeseries",
       "title": "EDUs forwarded, by destination writer",
       "description": "Forwards by stream writer. In shadow, set this beside the Synapse panel below: the counts should match what the Python worker sends.",
-      "id": 13,
+      "id": 14,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 12,
-        "y": 15,
+        "y": 18,
         "w": 12,
         "h": 8
       },
@@ -828,14 +880,14 @@
       "type": "timeseries",
       "title": "Forward latency",
       "description": "One EDU handed to its writer over replication, retries included.",
-      "id": 14,
+      "id": 15,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 0,
-        "y": 23,
+        "y": 26,
         "w": 8,
         "h": 8
       },
@@ -903,14 +955,14 @@
       "type": "timeseries",
       "title": "Forwards by outcome",
       "description": "ok, error (a non-retryable answer) or timeout (gave up after retrying).",
-      "id": 15,
+      "id": 16,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 8,
-        "y": 23,
+        "y": 26,
         "w": 8,
         "h": 8
       },
@@ -967,14 +1019,14 @@
       "type": "timeseries",
       "title": "Replication retries and ACL removals",
       "description": "Retries of a forward (timeout or connection refused), and rooms removed from receipt EDUs by server ACL.",
-      "id": 16,
+      "id": 17,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 16,
-        "y": 23,
+        "y": 26,
         "w": 8,
         "h": 8
       },
@@ -1041,11 +1093,11 @@
     {
       "type": "row",
       "title": "Shadow evaluation",
-      "id": 17,
+      "id": 18,
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 31,
+        "y": 34,
         "w": 24,
         "h": 1
       },
@@ -1055,14 +1107,14 @@
       "type": "timeseries",
       "title": "Shadow decisions",
       "description": "For each transaction Synapse handled, what native mode would have done, and why not when it would have proxied.",
-      "id": 18,
+      "id": 19,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 0,
-        "y": 32,
+        "y": 35,
         "w": 12,
         "h": 8
       },
@@ -1119,14 +1171,14 @@
       "type": "timeseries",
       "title": "Disagreements and dropped evaluations",
       "description": "Disagreements by Synapse's status; evaluations dropped because the shadow queue was full.",
-      "id": 19,
+      "id": 20,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 12,
-        "y": 32,
+        "y": 35,
         "w": 12,
         "h": 8
       },
@@ -1194,11 +1246,11 @@
     {
       "type": "row",
       "title": "Synapse, for comparison",
-      "id": 20,
+      "id": 21,
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 40,
+        "y": 43,
         "w": 24,
         "h": 1
       },
@@ -1208,14 +1260,14 @@
       "type": "timeseries",
       "title": "Synapse: EDUs received over replication, by writer",
       "description": "ReplicationFederationSendEduRestServlet on each Synapse instance: every EDU forwarded to it, from the Python worker or from us. Moving to native must not change this.",
-      "id": 21,
+      "id": 22,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 0,
-        "y": 41,
+        "y": 44,
         "w": 8,
         "h": 8
       },
@@ -1272,14 +1324,14 @@
       "type": "timeseries",
       "title": "Synapse: /send reaching the Python worker",
       "description": "FederationSendServlet on the Python inbound worker. Falls by ~96% once EDU-only transactions are native.",
-      "id": 22,
+      "id": 23,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 8,
-        "y": 41,
+        "y": 44,
         "w": 8,
         "h": 8
       },
@@ -1347,14 +1399,14 @@
       "type": "timeseries",
       "title": "Synapse: inbound EDUs and PDUs at the Python worker",
       "description": "What the Python worker still parses.",
-      "id": 23,
+      "id": 24,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 16,
-        "y": 41,
+        "y": 44,
         "w": 8,
         "h": 8
       },
@@ -1421,11 +1473,11 @@
     {
       "type": "row",
       "title": "Database",
-      "id": 24,
+      "id": 25,
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 49,
+        "y": 52,
         "w": 24,
         "h": 1
       },
@@ -1435,14 +1487,14 @@
       "type": "timeseries",
       "title": "Queries by name and result",
       "description": "Every query is a primary-key lookup: txn_state once per native transaction, current_server_acl for typing and receipts (cached 5s per room), server_keys on a key-cache miss.",
-      "id": 25,
+      "id": 26,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 0,
-        "y": 50,
+        "y": 53,
         "w": 8,
         "h": 8
       },
@@ -1499,14 +1551,14 @@
       "type": "timeseries",
       "title": "Query latency (p99)",
       "description": "",
-      "id": 26,
+      "id": 27,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 8,
-        "y": 50,
+        "y": 53,
         "w": 8,
         "h": 8
       },
@@ -1563,14 +1615,14 @@
       "type": "timeseries",
       "title": "ACL lookups by source",
       "description": "cached, db, error, redacted (a redacted ACL sends the transaction to Synapse).",
-      "id": 27,
+      "id": 28,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 16,
-        "y": 50,
+        "y": 53,
         "w": 8,
         "h": 8
       },
@@ -1626,11 +1678,11 @@
     {
       "type": "row",
       "title": "Process: goinbound vs the Python inbound worker",
-      "id": 28,
+      "id": 29,
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 58,
+        "y": 61,
         "w": 24,
         "h": 1
       },
@@ -1640,14 +1692,14 @@
       "type": "timeseries",
       "title": "CPU",
       "description": "Cores used.",
-      "id": 29,
+      "id": 30,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 0,
-        "y": 59,
+        "y": 62,
         "w": 8,
         "h": 8
       },
@@ -1716,14 +1768,14 @@
       "type": "timeseries",
       "title": "Resident memory",
       "description": "",
-      "id": 30,
+      "id": 31,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 8,
-        "y": 59,
+        "y": 62,
         "w": 8,
         "h": 8
       },
@@ -1791,14 +1843,14 @@
       "type": "timeseries",
       "title": "Goroutines and restarts",
       "description": "Goroutines should track request concurrency, not grow. A restart is a step in process_start_time_seconds.",
-      "id": 31,
+      "id": 32,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 16,
-        "y": 59,
+        "y": 62,
         "w": 8,
         "h": 8
       },

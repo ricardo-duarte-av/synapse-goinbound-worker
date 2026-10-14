@@ -6,11 +6,17 @@ import (
 	"testing"
 )
 
-const minimal = `
+const base = `
 listen:
   socket: /var/sockets/goinbound.sock
 upstream:
   sockets: [/var/sockets/inbound.sock]
+`
+
+const minimal = base + `
+modes:
+  edu: proxy
+  pdu: proxy
 `
 
 func TestDefaults(t *testing.T) {
@@ -18,9 +24,8 @@ func TestDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The first deployment must change nothing: proxy is the default.
-	if cfg.Mode.Kind != ModeProxy {
-		t.Errorf("default mode = %s, want proxy", cfg.Mode)
+	if cfg.Modes.EDU.Kind != ModeProxy || cfg.Modes.PDU.Kind != ModeProxy {
+		t.Errorf("modes = %+v", cfg.Modes)
 	}
 	if cfg.HomeserverYAML != "/etc/synapse/homeserver.yaml" {
 		t.Errorf("homeserver_yaml default = %q", cfg.HomeserverYAML)
@@ -42,33 +47,54 @@ func TestModes(t *testing.T) {
 		"canary:100": {Kind: ModeCanary, CanaryPercent: 100},
 	}
 	for in, want := range cases {
-		cfg, err := parse([]byte(minimal + "mode: " + in + "\n"))
+		cfg, err := parse([]byte(base + "modes:\n  edu: " + in + "\n  pdu: proxy\n"))
 		if err != nil {
 			t.Errorf("%s: %v", in, err)
 			continue
 		}
-		if cfg.Mode != want {
-			t.Errorf("%s parsed as %+v", in, cfg.Mode)
+		if cfg.Modes.EDU != want {
+			t.Errorf("%s parsed as %+v", in, cfg.Modes.EDU)
 		}
-		if cfg.Mode.String() != in {
-			t.Errorf("%s prints as %s", in, cfg.Mode)
+		if cfg.Modes.EDU.String() != in {
+			t.Errorf("%s prints as %s", in, cfg.Modes.EDU)
 		}
 	}
 	for _, bad := range []string{"canary", "canary:101", "native:5", "fast"} {
-		if _, err := parse([]byte(minimal + "mode: " + bad + "\n")); err == nil {
+		if _, err := parse([]byte(base + "modes:\n  edu: " + bad + "\n  pdu: proxy\n")); err == nil {
 			t.Errorf("mode %q was accepted", bad)
 		}
 	}
 }
 
+// What is proxied, shadowed or native is spelled out, never implied.
+func TestModesAreExplicit(t *testing.T) {
+	cases := map[string]string{
+		"no modes at all":   base,
+		"edu missing":       base + "modes:\n  pdu: proxy\n",
+		"pdu missing":       base + "modes:\n  edu: native\n",
+		"pdu not proxy":     base + "modes:\n  edu: native\n  pdu: shadow\n",
+		"pdu native":        base + "modes:\n  edu: proxy\n  pdu: native\n",
+		"the old mode: key": base + "mode: shadow\n",
+	}
+	for name, y := range cases {
+		if _, err := parse([]byte(y)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	_, err := parse([]byte(base + "mode: shadow\n"))
+	if err == nil || !strings.Contains(err.Error(), "edu: shadow") {
+		t.Errorf("the old key's error does not say what to write instead: %v", err)
+	}
+}
+
 func TestValidation(t *testing.T) {
 	bad := map[string]string{
-		"no listener":     "upstream:\n  sockets: [/s]\n",
-		"two listeners":   "listen:\n  socket: /a\n  addr: ':1'\nupstream:\n  sockets: [/s]\n",
-		"no upstream":     "listen:\n  socket: /a\n",
+		"no listener":     "upstream:\n  sockets: [/s]\nmodes: {edu: proxy, pdu: proxy}\n",
+		"two listeners":   "listen:\n  socket: /a\n  addr: ':1'\nupstream:\n  sockets: [/s]\nmodes: {edu: proxy, pdu: proxy}\n",
+		"no upstream":     "listen:\n  socket: /a\nmodes: {edu: proxy, pdu: proxy}\n",
 		"negative":        minimal + "max_body_mb: -1\n",
-		"unknown key":     minimal + "moed: native\n",
-		"bad socket mode": "listen:\n  socket: /a\n  socket_mode: '999'\nupstream:\n  sockets: [/s]\n",
+		"unknown key":     minimal + "modez: native\n",
+		"bad socket mode": "listen:\n  socket: /a\n  socket_mode: '999'\nupstream:\n  sockets: [/s]\nmodes: {edu: proxy, pdu: proxy}\n",
 	}
 	for name, y := range bad {
 		if _, err := parse([]byte(y)); err == nil {
@@ -87,8 +113,8 @@ func TestExampleConfigLoads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Mode.Kind != ModeProxy {
-		t.Errorf("the example starts in %s; it must start in proxy", cfg.Mode)
+	if cfg.Modes.EDU.Kind != ModeProxy || cfg.Modes.PDU.Kind != ModeProxy {
+		t.Errorf("the example starts in %+v; it must start with everything proxied", cfg.Modes)
 	}
 	if !strings.HasPrefix(cfg.HomeserverYAML, "/etc/synapse/") {
 		t.Errorf("example homeserver_yaml %q is not under the read-only mount", cfg.HomeserverYAML)
