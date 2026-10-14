@@ -75,7 +75,14 @@ things that are not derivable from the code.
   runs it.
 - Unix socket paths must be under 108 bytes. The session scratchpad path is
   too long for one.
-- The 24k EDUs a day that the Python worker forwards to **main** are of an
-  unknown type. Synapse logs nothing at the default level. Shadow mode logs the
-  first sighting of each unknown type (`noteUnknown`), and counts them as
-  `edu_type="other", writer="master"`.
+- **The Python worker sends receipts and to-device EDUs to main**, not to
+  their writer: a federation-only worker never constructs ReceiptsHandler or
+  DeviceMessageHandler, whose constructors register the routes. Main
+  re-forwards them to av-edu-worker. This was the "24k/day to main of unknown
+  type". It was found by matching shadow forwards against
+  `synapse_outgoing_replication_requests_total{name="fed_send_edu"}`, which
+  shows main as a sender too. We go straight to the writer, on purpose.
+  Expect, once native: main's received fed_send_edu falls to ~0, main's
+  outgoing fed_send_edu falls with it, and av-edu-worker's total is unchanged.
+- Main and the workers log at ERROR, so Synapse's own "Got %r edu" lines are
+  never written. Use metrics.

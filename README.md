@@ -120,10 +120,17 @@ sum by (route, reason) (rate(goinbound_requests_total[1h]))
 
 # Shadow: what native would have done, by EDU type and destination ...
 sum by (edu_type, action, writer) (increase(goinbound_edus_total{path="shadow"}[1d]))
-# ... against what the Python worker actually forwarded (47k/day to av-edu-worker,
-# 24k/day to master in October 2026).
+# ... against what Synapse's writers actually receive.
 sum by (job) (increase(synapse_http_server_requests_received_total{
   server_name="aguiarvieira.pt", servlet="ReplicationFederationSendEduRestServlet"}[1d]))
+# Note: the Python worker sends receipts and to-device EDUs to MAIN, which
+# re-forwards them to av-edu-worker (it never builds those handlers; see
+# internal/edu/router.go). So in shadow mode our av-edu-worker forwards equal
+# Synapse's av-edu-worker count minus main's re-forwards, and main's share
+# shows up under av-edu-worker on our side. Once native, main's count falls
+# to ~0 and av-edu-worker's total stays the same.
+sum by (job) (increase(synapse_outgoing_replication_requests_total{
+  server_name="aguiarvieira.pt", name="fed_send_edu"}[1d]))
 
 # Shadow: transactions we would have answered 200 that Synapse did not.
 sum by (synapse_status) (increase(goinbound_shadow_disagreements_total[1d]))

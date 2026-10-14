@@ -34,6 +34,17 @@ type Router struct {
 //	m.signing_key_update (+unstable) writers.device_lists[0]  handlers/e2e_keys.py:111
 //
 // Every other type falls back to ["master"] (federation_server.py:1698).
+//
+// This is the table as Synapse's handlers DEFINE it, which is not quite what a
+// federation-only Python worker does. Those registrations happen in handler
+// constructors, and such a worker never constructs ReceiptsHandler or
+// DeviceMessageHandler -- only client servlets do (rest/client/receipts.py,
+// sendtodevice.py). So on the Python inbound worker, receipts and to-device
+// EDUs fall back to main, and main, which does register them, forwards them
+// on to the writer. That hop changes nothing but load on main, the most
+// contended process, so it is deliberately not reproduced: they go straight
+// to their writer. It is what the "24k/day to main" measured in October 2026
+// was.
 func NewRouter(w synapsecfg.Writers) *Router {
 	first := func(l []string) []string { return l[:1] }
 	return &Router{
