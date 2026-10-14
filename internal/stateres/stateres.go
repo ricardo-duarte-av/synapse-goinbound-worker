@@ -7,8 +7,7 @@
 // admitted into state, and the unconflicted state is laid over the result.
 // Function names match v2.py so each can be read beside its original.
 //
-// Room version 1 uses state resolution v1, which is not ported: Resolve
-// returns ErrUnsupported for it.
+// Room version 1 uses state resolution v1 (v1.go).
 package stateres
 
 import (
@@ -66,13 +65,17 @@ func ResolveTraced(ctx context.Context, roomID string, rv *pdu.RoomVersion, stat
 // ResolveWith is Resolve with options.
 func ResolveWith(ctx context.Context, roomID string, rv *pdu.RoomVersion, stateSets []pdu.StateMap, store Store, opts Options) (pdu.StateMap, error) {
 	trace := opts.Trace
-	if rv.StateRes != pdu.StateResV2 && rv.StateRes != pdu.StateResV21 {
-		return nil, ErrUnsupported
-	}
 	if trace == nil {
 		trace = func(string, ...any) {}
 	}
 	r := &resolver{ctx: ctx, roomID: roomID, rv: rv, store: store, events: map[string]*pdu.Event{}, trace: trace, opts: opts}
+	switch rv.StateRes {
+	case pdu.StateResV1:
+		return r.resolveV1(stateSets)
+	case pdu.StateResV2, pdu.StateResV21:
+	default:
+		return nil, ErrUnsupported
+	}
 
 	unconflicted, conflicted := separate(stateSets)
 	if len(conflicted) == 0 {

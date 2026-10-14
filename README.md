@@ -193,7 +193,7 @@ compared with what Synapse stored. Counted in `goinbound_pdu_shadow_total`
 | Package | What it is |
 |---|---|
 | `internal/pdu` | A port of Synapse's `event_auth.py`, with room version flags from `rust/src/room_versions.rs`. |
-| `internal/stateres` | A port of Synapse's state resolution v2 and v2.1 (`state/v2.py`). Its tests are Synapse's own `tests/state/test_v2.py` cases. |
+| `internal/stateres` | A port of Synapse's state resolution v1, v2 and v2.1 (`state/v1.py`, `state/v2.py`). Its tests are Synapse's own `tests/state/test_v2.py` cases; v1 is checked against room v1 history (176/176 forked events, 88 resolutions). |
 | `internal/pdustore` | Reads events, auth edges and state groups. |
 | `cmd/pdusweep` | Replays stored events through both, and compares the result with what Synapse decided and stored. |
 
@@ -222,7 +222,6 @@ What the replay skips, and why:
 
 Not yet ported:
 
-- state resolution v1 (room version 1);
 - the size limits in `validate_event_for_room_version`.
 
 State resolution uses Synapse's chain cover index, cross-checked against a
