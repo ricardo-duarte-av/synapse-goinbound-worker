@@ -177,22 +177,40 @@ func (s *Verifier) Push(ctx context.Context, id string, before pdu.StateMap, sna
 	}
 
 	// A read receipt at or after the event deletes the reader's
-	// non-highlight rows.
-	var readers []string
+	// non-highlight rows -- but in a background loop
+	// (_handle_new_receipts_for_notifs_txn), so the row may or may not
+	// still be there. Such a reader is left out on both sides.
+	readerThread := map[string]string{}
 	for u, r := range ours {
 		if !r.highlight {
-			readers = append(readers, u)
+			readerThread[u] = r.thread
 		}
 	}
-	if len(readers) > 0 {
+	for u, r := range storedRows {
+		if !r.highlight {
+			if o, ok := ours[u]; !ok || !o.highlight {
+				readerThread[u] = r.thread
+			}
+		}
+	}
+	if len(readerThread) > 0 {
+		readers := make([]string, 0, len(readerThread))
+		for u := range readerThread {
+			readers = append(readers, u)
+		}
 		receipts, err := s.st.Receipts(ctx, ev.RoomID, readers)
 		if err != nil {
 			return res.fail(OutcomeError, err.Error())
 		}
 		for u, rs := range receipts {
 			for _, rc := range rs {
-				if rc.StreamOrdering >= se.StreamOrdering && (rc.ThreadID == nil || *rc.ThreadID == ours[u].thread) {
-					delete(ours, u)
+				if rc.StreamOrdering >= se.StreamOrdering && (rc.ThreadID == nil || *rc.ThreadID == readerThread[u]) {
+					if o, ok := ours[u]; !ok || !o.highlight {
+						delete(ours, u)
+					}
+					if st, ok := storedRows[u]; ok && !st.highlight {
+						delete(storedRows, u)
+					}
 					break
 				}
 			}

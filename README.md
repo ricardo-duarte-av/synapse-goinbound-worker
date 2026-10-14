@@ -264,8 +264,9 @@ Who is in the room is read from current state. So the check is skipped as
 - `pruned`: summarised rows are deleted after a day;
 - `invite`: invite filtering (MSC4155) is not ported.
 
-A reader's receipt at or past the event deletes their non-highlight rows,
-so those are left out of the comparison.
+A reader's receipt at or past the event deletes their non-highlight rows.
+That happens in a background loop, so the row may still be there when the
+check runs. Such readers are left out of the comparison on both sides.
 `pdusweep -push` runs the same check over recent stored events. On
 2026-10-14, 1,251 events with rows matched exactly, across v1-v12:
 2,574 rows, 1,410 of them notifying. A deliberate mutation (unread always

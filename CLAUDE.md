@@ -116,7 +116,10 @@ things that are not derivable from the code.
   `git show v1.162.0:<path>`.
 - **`event_push_actions` loses rows, which is not a disagreement.**
   - A read receipt of any type, at or past the event, deletes the reader's
-    non-highlight rows.
+    non-highlight rows. A background loop does it, so the live check
+    can still see the row seconds after the receipt (3 mismatches on
+    2026-10-14). Skip such readers on both sides; don't expect the row
+    to be gone.
   - A redaction deletes all of the event's rows.
   - Rows a day old are deleted once summarised.
 
