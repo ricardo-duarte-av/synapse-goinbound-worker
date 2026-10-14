@@ -180,8 +180,47 @@ HOMESERVER_YAML=/opt/matrix/synapse/synapse/homeserver.yaml go test -run LivePre
 and checks that a wrong secret is refused. It is a no-op only because presence
 is untracked here; the test refuses to run otherwise.
 
-## Not done yet
+## PDU checker (in progress)
 
-The PDU shadow verifier from the plan: state resolution, event auth, soft-fail
-and push actions, diffed against what Synapse writes. It has not been started.
-PDUs are always proxied.
+PDUs are always proxied (`modes.pdu: proxy`). The checker that will verify
+them is being built bottom-up. The first part is done, and it is checked
+offline against history.
+
+| Package | What it is |
+|---|---|
+| `internal/pdu` | A port of Synapse's `event_auth.py`, with room version flags from `rust/src/room_versions.rs`. |
+| `internal/stateres` | A port of Synapse's state resolution v2 and v2.1 (`state/v2.py`). Its tests are Synapse's own `tests/state/test_v2.py` cases. |
+| `internal/pdustore` | Reads events, auth edges and state groups. |
+| `cmd/pdusweep` | Replays stored events through both, and compares the result with what Synapse decided and stored. |
+
+`cmd/pdusweep`, for each sampled event:
+
+1. resolves the state of its prev events;
+2. runs Synapse's receive-path auth pipeline;
+3. compares the verdict with Synapse's rejection record, and the resulting
+   state with the state group Synapse stored.
+
+```sh
+go run ./cmd/pdusweep -n 100 -forks      # events where state resolution runs
+go run ./cmd/pdusweep -n 100 -rejected   # events Synapse rejected
+go run ./cmd/pdusweep -event '$id'       # one event, with a full trace
+```
+
+First results, 2026-10-14: 1,180 comparable events across room versions 4–12,
+including 533 real state resolutions and 513 rejected events. Every one
+matches Synapse, in its verdict and in its resolved state.
+
+What the replay skips, and why:
+
+- events whose prev events have no state group;
+- events where a prev's state group is newer than the event's own. Synapse
+  then got that state from a remote, not from what is stored now.
+
+Not yet ported:
+
+- state resolution v1 (room version 1);
+- third-party invite signature checks;
+- the size limits in `validate_event_for_room_version`.
+
+Not yet built: the live checker on proxied transactions (soft-fail, push
+actions, missing-event handling).

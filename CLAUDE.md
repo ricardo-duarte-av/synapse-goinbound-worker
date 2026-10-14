@@ -69,6 +69,32 @@ things that are not derivable from the code.
   wrong secret Synapse's 500 (`TestLivePresenceProbe`). The edu-worker does
   not log at info, so its logs show nothing either way.
 
+## PDU checker notes
+
+- **Port Synapse, not the spec, and not mautrix's eventauth.** mautrix's
+  `Authorize` follows the spec, which differs from Synapse in ways that
+  change outcomes:
+  - it rejects a v12 create event passed among precomputed auth events;
+  - it has no special-case `m.room.aliases` rule for v1–v5;
+  - it treats `m.federate` as "not false" where Synapse requires exactly
+    `True`.
+
+  `internal/pdu` is a line-by-line port of `event_auth.py` instead.
+- **Synapse's non-AuthError exceptions are a third outcome** (`RaiseError`).
+  A `SynapseError` (stringy power levels in v10+, a bad user ID in `users`),
+  a `KeyError` or a `ValueError` from `int()` escapes `except AuthError`. In
+  the receive path the event then fails rather than being rejected. In
+  state resolution the whole resolution fails. Never count one as a
+  rejection.
+- **v12 `auth_event_ids()` appends the create event**
+  (`rust/src/events/formats/v4.rs`). `ParseEvent` does the same. Without it,
+  every v12 event fails "no create event in auth events".
+- **A state set's auth chain includes the set's own events**, as Synapse
+  implements it. That is not the spec's wording.
+- **The state group IDs date the computation.** If a prev's group is newer
+  than the event's, Synapse cannot have used it. That was the only cause of
+  mismatches in the first sweep.
+
 ## Traps
 
 - **Never name a metric label `instance` (or `job`).** Prometheus owns those.
