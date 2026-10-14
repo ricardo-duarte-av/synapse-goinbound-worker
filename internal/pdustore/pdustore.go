@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -25,6 +26,7 @@ var Tables = []string{
 	"event_to_state_groups", "state_groups_state", "state_group_edges", "event_edges",
 	"event_auth_chains", "event_auth_chain_links", "server_signature_keys", "redactions",
 	"event_forward_extremities", "current_state_events", "partial_state_rooms",
+	"federation_inbound_events_staging",
 	// The push check.
 	"local_current_membership", "room_memberships", "push_rules", "push_rules_enable",
 	"ignored_users", "event_relations", "thread_subscriptions", "room_depth", "event_push_actions", "receipts_linearized",
@@ -396,6 +398,44 @@ func (s *Store) EventExists(ctx context.Context, id string) (bool, error) {
 	var ok bool
 	if err := s.pool.QueryRow(ctx, qEventExists, id).Scan(&ok); err != nil {
 		return false, fmt.Errorf("pdustore: event exists: %w", err)
+	}
+	return ok, nil
+}
+
+const qHostJoined = `SELECT state_key FROM current_state_events
+	WHERE membership = 'join' AND type = 'm.room.member' AND room_id = $1 AND state_key LIKE $2
+	LIMIT 1`
+
+// HostJoined reports whether a user of host is joined to the room, as
+// Synapse's is_host_joined (roommember.py:1191) does. A PDU for a room the
+// receiving server is not in is ignored (federation_event.py:252). ok is
+// false when host is one Synapse refuses to look up, raising instead.
+func (s *Store) HostJoined(ctx context.Context, roomID, host string) (joined, ok bool, err error) {
+	if strings.ContainsAny(host, "%_") {
+		return false, false, nil
+	}
+	var userID string
+	switch err := s.pool.QueryRow(ctx, qHostJoined, roomID, "%:"+host).Scan(&userID); {
+	case errors.Is(err, pgx.ErrNoRows):
+		return false, true, nil
+	case err != nil:
+		return false, false, fmt.Errorf("pdustore: host joined: %w", err)
+	}
+	// Synapse raises when the match is not the host's own user.
+	if _, domain, found := strings.Cut(userID, ":"); !found || domain != host {
+		return false, false, nil
+	}
+	return true, true, nil
+}
+
+const qStaged = `SELECT EXISTS (SELECT 1 FROM federation_inbound_events_staging WHERE event_id = $1)`
+
+// Staged reports whether the event is still in Synapse's inbound staging
+// queue: received, and not yet processed.
+func (s *Store) Staged(ctx context.Context, id string) (bool, error) {
+	var ok bool
+	if err := s.pool.QueryRow(ctx, qStaged, id).Scan(&ok); err != nil {
+		return false, fmt.Errorf("pdustore: staged: %w", err)
 	}
 	return ok, nil
 }

@@ -26,6 +26,7 @@ type Live struct {
 	queue    chan *job
 	maxWait  time.Duration
 	prevWait time.Duration
+	server   string
 	onRes    func(string, *Result)
 	wg       sync.WaitGroup
 	ctx      context.Context
@@ -60,6 +61,9 @@ type LiveOptions struct {
 	// PrevWait bounds waiting for a PDU's prev events to be persisted
 	// before snapshotting its room. Zero uses 60s.
 	PrevWait time.Duration
+	// ServerName is ours. When set, a PDU for a room it is not joined to
+	// is ignored, as Synapse does, rather than waited for.
+	ServerName string
 	// OnResult, when set, is called with every check's result. For tests.
 	OnResult func(check string, r *Result)
 }
@@ -79,7 +83,7 @@ func NewLive(v *Verifier, st *pdustore.Store, o LiveOptions, log zerolog.Logger)
 		o.PrevWait = time.Minute
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	l := &Live{v: v, st: st, log: log, queue: make(chan *job, o.Queue), maxWait: o.MaxWait, prevWait: o.PrevWait, onRes: o.OnResult, ctx: ctx, cancel: cancel}
+	l := &Live{v: v, st: st, log: log, queue: make(chan *job, o.Queue), maxWait: o.MaxWait, prevWait: o.PrevWait, server: o.ServerName, onRes: o.OnResult, ctx: ctx, cancel: cancel}
 	for i := 0; i < o.Concurrency; i++ {
 		l.wg.Add(1)
 		go l.work()
@@ -184,6 +188,24 @@ func (l *Live) prepare(j *job) {
 	if err != nil {
 		return // reported by the checks, which parse the stored copy
 	}
+	if l.server != "" {
+		joined, ok, err := l.st.HostJoined(ctx, j.roomID, l.server)
+		switch {
+		case err != nil:
+			j.fail = "host joined lookup"
+			return
+		case ok && !joined && rescindsInvite(ev, l.server):
+			// Synapse may persist it as an out-of-band outlier
+			// (federation_event.py:262), which we do not check.
+			j.skip = "not in room, invite rescission"
+			return
+		case ok && !joined:
+			// Synapse drops it (federation_event.py:296). Its
+			// prevs never arrive, so do not wait for them.
+			j.agree = "not in room"
+			return
+		}
+	}
 	types, err := pdu.AuthTypesForEvent(rv, ev)
 	if err != nil {
 		return
@@ -193,6 +215,20 @@ func (l *Live) prepare(j *job) {
 	if err == nil {
 		j.snap = snap
 	}
+}
+
+// rescindsInvite is the shape of event Synapse considers, when not in the
+// room, as rescinding an invite to one of its users: someone else's leave
+// for a local user.
+func rescindsInvite(ev *pdu.Event, server string) bool {
+	if ev.Type != "m.room.member" || ev.StateKey == nil || *ev.StateKey == ev.Sender {
+		return false
+	}
+	if m, err := ev.Membership(); err != nil || m != "leave" {
+		return false
+	}
+	_, domain, _ := strings.Cut(*ev.StateKey, ":")
+	return domain == server
 }
 
 // awaitPrevs waits, up to prevWait, until the event's prev events are in
@@ -379,6 +415,12 @@ func (l *Live) notPersisted(ctx context.Context, raw []byte, rv *pdu.RoomVersion
 			l.record("received", OutcomeMatch, "too large, not persisted")
 			return
 		}
+		if staged, err := l.st.Staged(ctx, eventID); err == nil && staged {
+			// Synapse has not reached it: its room's queue is
+			// behind, usually fetching missing prev events.
+			l.record("received", OutcomeSkipped, "still queued by Synapse")
+			return
+		}
 		l.record("received", OutcomeSkipped, "not persisted")
 		log.Debug().Msg("PDU shadow: Synapse has not persisted a PDU whose signatures verify")
 	case errors.Is(err, pdu.ErrKeyUnknown):
@@ -401,7 +443,8 @@ func reasonLabel(outcome, reason string) string {
 	for _, known := range []string{
 		"no room_id", "unknown room", "unsupported room version", "event id not computable", "no event id",
 		"room version lookup", "waiting for persistence", "malformed, not persisted", "too large, not persisted", "not persisted, key unknown",
-		"not persisted", "bad signature, not persisted", "signatures",
+		"not persisted", "bad signature, not persisted", "signatures", "still queued by Synapse",
+		"not in room", "not in room, invite rescission", "host joined lookup",
 		"outlier", "create event", "prev event without state group", "a prev's state was computed after the event's",
 		"no state group for the event", "state resolution v1", "signing key not held", "signing key replaced",
 		"rejected", "partial state room", "snapshot taken after the event", "backfilled", "missing prevs", "race",

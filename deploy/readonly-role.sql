@@ -39,6 +39,7 @@ GRANT SELECT ON
     event_relations,
     event_to_state_groups,
     events,
+    federation_inbound_events_staging,
     ignored_users,
     local_current_membership,
     partial_state_rooms,

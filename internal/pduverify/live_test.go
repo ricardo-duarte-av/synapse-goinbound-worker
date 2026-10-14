@@ -10,6 +10,7 @@ import (
 
 	"github.com/rs/zerolog"
 
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pdu"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pdustore"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/stateres"
 )
@@ -92,5 +93,32 @@ func TestLiveOnStoredEvents(t *testing.T) {
 			}
 		}
 		t.Logf("%s: %v", check, counts)
+	}
+}
+
+func TestRescindsInvite(t *testing.T) {
+	rv, _ := pdu.LookupRoomVersion("10")
+	ev := func(sender, stateKey, membership string) *pdu.Event {
+		raw := `{"type":"m.room.member","room_id":"!r:x","sender":"` + sender + `","state_key":"` + stateKey +
+			`","content":{"membership":"` + membership + `"},"auth_events":[],"prev_events":[],"depth":1,"origin_server_ts":1}`
+		e, err := pdu.ParseEvent([]byte(raw), "$e", rv, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return e
+	}
+	for _, c := range []struct {
+		e    *pdu.Event
+		want bool
+	}{
+		{ev("@a:remote", "@b:us", "leave"), true},
+		{ev("@b:us", "@b:us", "leave"), false},         // our own leave
+		{ev("@a:remote", "@c:remote", "leave"), false}, // not ours
+		{ev("@a:remote", "@b:us", "ban"), false},
+		{ev("@a:remote", "@b:usx", "leave"), false},
+	} {
+		if got := rescindsInvite(c.e, "us"); got != c.want {
+			t.Errorf("%s -> %s: got %v", c.e.Sender, *c.e.StateKey, got)
+		}
 	}
 }

@@ -249,6 +249,14 @@ event of the room was persisted between the snapshot and this one, the
 current state may have moved, and the case is counted as `race` rather than
 compared.
 
+A PDU for a room no local user is joined to is not waited for: Synapse
+drops it ("not in room", `federation_event.py:296`), and so do we. Someone
+else's leave for a local user is the exception Synapse may persist as an
+outlier; it is skipped. A PDU that is still not persisted when the wait ends
+is `still queued by Synapse` if it is in `federation_inbound_events_staging`
+(the room's queue is behind, usually fetching missing prevs), and
+`not persisted` if Synapse dropped it.
+
 Push actions are checked last. The shadow reproduces
 `BulkPushRuleEvaluator._action_for_event_by_user` against each user's push
 rules (`internal/push`, a port of Synapse's Rust evaluator, with the base
