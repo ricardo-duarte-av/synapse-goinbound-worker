@@ -196,6 +196,28 @@ func TestInstanceWithoutAddressIsRefused(t *testing.T) {
 	}
 }
 
+// PyYAML keeps the last of a repeated key; this deployment repeats one in
+// experimental_features, and refusing the file would stop the worker.
+func TestDuplicateExperimentalKeyLastWins(t *testing.T) {
+	cfg := mustParse(t, "server_name: x\nexperimental_features:\n  msc3814_enabled: false\n  msc3814_enabled: true\n")
+	if !cfg.Flag("msc3814_enabled", false) {
+		t.Error("the later msc3814_enabled: true did not win")
+	}
+	if !cfg.Flag("msc4210_enabled", true) {
+		t.Error("an absent flag did not take its default")
+	}
+}
+
+// app_service_config_files name paths in Synapse's container; each is found
+// beside homeserver.yaml when that path does not exist here.
+func TestAppServiceFilesResolvedBesideHomeserverYAML(t *testing.T) {
+	cfg := mustParse(t, "server_name: x\napp_service_config_files:\n  - /data/reg.yaml\n  - other.yaml\n")
+	want := []string{"/etc/synapse/reg.yaml", "/etc/synapse/other.yaml"}
+	if !slices.Equal(cfg.AppServiceFiles, want) {
+		t.Errorf("files = %v, want %v", cfg.AppServiceFiles, want)
+	}
+}
+
 // TestLiveHomeserverYAML reads the deployment's real file. Every writer it
 // names must be reachable, or this worker would refuse to start.
 //

@@ -87,6 +87,21 @@ type Config struct {
 
 	// Database is Synapse's PostgreSQL connection.
 	Database Database
+
+	// Experimental is experimental_features, as given.
+	Experimental map[string]any
+
+	// AppServiceFiles are app_service_config_files, resolved to readable
+	// paths (beside homeserver.yaml when Synapse's own path is absent).
+	AppServiceFiles []string
+}
+
+// Flag reads a boolean experimental feature, with Synapse's default.
+func (c *Config) Flag(name string, def bool) bool {
+	if v, ok := c.Experimental[name].(bool); ok {
+		return v
+	}
+	return def
 }
 
 // raw mirrors only the keys we read. Everything else in the file is ignored, so
@@ -122,6 +137,9 @@ type raw struct {
 	UsePresence any `yaml:"use_presence"`
 
 	FederationDomainWhitelist []string `yaml:"federation_domain_whitelist"`
+
+	ExperimentalFeatures  yaml.Node `yaml:"experimental_features"`
+	AppServiceConfigFiles []string  `yaml:"app_service_config_files"`
 
 	// Absent and empty mean different things: absent is matrix.org.
 	TrustedKeyServers *[]struct {
@@ -178,6 +196,19 @@ func parse(b []byte, path string) (*Config, error) {
 	}
 
 	cfg.TrackPresence = trackPresence(r)
+	cfg.Experimental = lastWins(&r.ExperimentalFeatures)
+
+	for _, f := range r.AppServiceConfigFiles {
+		dir := filepath.Dir(path)
+		p := f
+		if !filepath.IsAbs(p) {
+			p = filepath.Join(dir, p)
+		}
+		if _, err := os.Stat(p); err != nil && filepath.IsAbs(f) {
+			p = filepath.Join(dir, filepath.Base(f))
+		}
+		cfg.AppServiceFiles = append(cfg.AppServiceFiles, p)
+	}
 
 	if r.FederationDomainWhitelist != nil {
 		cfg.DomainWhitelist = make(map[string]bool, len(r.FederationDomainWhitelist))
@@ -505,4 +536,21 @@ func database(r raw) (Database, error) {
 			"synapsecfg: database.args names no database (neither `database` nor `dbname`)")
 	}
 	return db, nil
+}
+
+// lastWins decodes a mapping the way PyYAML does: a repeated key keeps its
+// last value. yaml.v3 refuses duplicates outright, and deployments have them
+// (msc3814_enabled twice in experimental_features, say).
+func lastWins(n *yaml.Node) map[string]any {
+	out := map[string]any{}
+	if n.Kind != yaml.MappingNode {
+		return out
+	}
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		var v any
+		if err := n.Content[i+1].Decode(&v); err == nil {
+			out[n.Content[i].Value] = v
+		}
+	}
+	return out
 }
