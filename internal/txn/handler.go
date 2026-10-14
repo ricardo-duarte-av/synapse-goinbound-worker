@@ -128,85 +128,91 @@ const (
 )
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	start := time.Now()
+	rec := &txnRec{start: time.Now(), auth: r.Header.Get("Authorization")}
+	defer rec.log(h.log)
 
 	txnID, version, ok := matchSend(r)
+	rec.txnID = txnID
 	if !ok || version != "v1" || r.Method != http.MethodPut || txnID == "" {
 		// Not something we handle: other methods, v2, an undecodable or
 		// empty transaction id (Synapse raises on that). Synapse answers.
-		h.proxyRaw(w, r, reasonNotSend, start)
+		h.proxyRaw(w, r, reasonNotSend, rec)
 		return
 	}
 	if h.mode.Kind == config.ModeProxy {
-		h.proxyRaw(w, r, reasonModeProxy, start)
+		h.proxyRaw(w, r, reasonModeProxy, rec)
 		return
 	}
 
 	body, complete, err := readBody(r, h.maxBody)
 	if err != nil {
 		// The sender went away mid-body. There is nobody to answer.
+		rec.route, rec.reason = routeAbandoned, "body_read"
 		requests.WithLabelValues(routeAbandoned, "body_read").Inc()
 		return
 	}
+	rec.bodyBytes = len(body)
 	if !complete {
 		// Too big to buffer: stream it on, read part and all.
 		r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(body), r.Body))
-		h.proxyRaw(w, r, reasonTooLarge, start)
+		h.proxyRaw(w, r, reasonTooLarge, rec)
 		return
 	}
 
 	if h.mode.Kind == config.ModeShadow {
 		pre := h.shadow.start(r, txnID)
-		res := h.proxyBody(w, r, body, reasonModeShadow, start)
+		res := h.proxyBody(w, r, body, reasonModeShadow, rec)
 		h.shadow.submit(r, body, txnID, res.Status, pre)
 		return
 	}
 
-	h.serve(w, r, body, txnID, start)
+	h.serve(w, r, body, txnID, rec)
 }
 
 // serve handles a buffered v1 /send in canary or native mode.
-func (h *Handler) serve(w http.ResponseWriter, r *http.Request, body []byte, txnID string, start time.Time) {
+func (h *Handler) serve(w http.ResponseWriter, r *http.Request, body []byte, txnID string, rec *txnRec) {
 	vr := h.verifier.Verify(withBody(r, body))
 	if !vr.OK() {
 		// Synapse gives the authoritative 401, or accepts a request we could
 		// not verify -- a key server we cannot reach, say. Either way it is
 		// Synapse's answer to give.
-		h.proxyBody(w, r, body, reasonAuth, start)
+		h.proxyBody(w, r, body, reasonAuth, rec)
 		return
 	}
 	origin := vr.Origin
+	rec.origin = origin
 
 	if h.whitelist != nil && !h.whitelist[origin] {
-		h.proxyBody(w, r, body, reasonWhitelist, start)
+		h.proxyBody(w, r, body, reasonWhitelist, rec)
 		return
 	}
 
-	f, ok := h.claim(w, r, origin, txnID, start)
+	f, ok := h.claim(w, r, origin, txnID, rec)
 	if !ok {
 		return
 	}
 
 	if ans, ok := h.coord.lookup(origin, txnID); ok {
 		h.coord.end(origin, f, nil)
-		h.write(w, ans, routeNative, "cached", start)
+		h.write(w, ans, routeNative, "cached", rec)
 		return
 	}
 
 	d := h.decide(r.Context(), origin, txnID, body, true, h.store.GetTxnState)
 	if d.proxyReason != "" {
-		h.proxyBody(w, r, body, d.proxyReason, start)
+		h.proxyBody(w, r, body, d.proxyReason, rec)
 		h.coord.end(origin, f, nil)
 		return
 	}
 	if d.stored != nil {
 		ans := answer{status: d.stored.Code, body: d.stored.JSON}
 		h.coord.end(origin, f, &ans)
-		h.write(w, ans, routeNative, "stored_response", start)
+		h.write(w, ans, routeNative, "stored_response", rec)
 		return
 	}
 
 	edu.Record("native", d.steps)
+	rec.steps = d.steps
 
 	// Detached from the sender's connection: Synapse finishes a transaction
 	// whose sender hung up, and an EDU forwarded halfway is worse than one
@@ -224,31 +230,32 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, body []byte, txn
 		// Not remembered: the sender retries, and the retry must be tried
 		// again rather than told it failed.
 		h.coord.end(origin, f, nil)
-		h.write(w, jsonError(http.StatusInternalServerError, "M_UNKNOWN", msg), routeNative, "forward_failed", start)
+		h.write(w, jsonError(http.StatusInternalServerError, "M_UNKNOWN", msg), routeNative, "forward_failed", rec)
 		return
 	}
 
 	ans := answer{status: http.StatusOK, body: []byte(`{"pdus":{}}`)}
 	h.coord.end(origin, f, &ans)
-	h.write(w, ans, routeNative, "ok", start)
+	h.write(w, ans, routeNative, "ok", rec)
 }
 
 // claim takes the origin's one-transaction-at-a-time slot, waiting out a
 // concurrent attempt at the same transaction. It answers the request itself
 // when it returns false.
-func (h *Handler) claim(w http.ResponseWriter, r *http.Request, origin, txnID string, start time.Time) (*flight, bool) {
+func (h *Handler) claim(w http.ResponseWriter, r *http.Request, origin, txnID string, rec *txnRec) (*flight, bool) {
 	for {
 		own, wait, busy := h.coord.begin(origin, txnID)
 		switch {
 		case busy:
 			h.write(w, jsonError(http.StatusTooManyRequests, "M_UNKNOWN", "Too many concurrent transactions"),
-				routeNative, "concurrent_txn", start)
+				routeNative, "concurrent_txn", rec)
 			return nil, false
 		case wait != nil:
 			select {
 			case <-wait.done:
 				continue
 			case <-r.Context().Done():
+				rec.route, rec.reason = routeAbandoned, "waiting_for_retry"
 				requests.WithLabelValues(routeAbandoned, "waiting_for_retry").Inc()
 				return nil, false
 			}
@@ -321,36 +328,38 @@ func canarySelected(origin string, percent int) bool {
 	return int(h.Sum32()%100) < percent
 }
 
-func (h *Handler) proxyRaw(w http.ResponseWriter, r *http.Request, reason string, start time.Time) proxy.Result {
+func (h *Handler) proxyRaw(w http.ResponseWriter, r *http.Request, reason string, rec *txnRec) proxy.Result {
 	res := h.upstream.Forward(w, r, 0)
-	h.recordProxy(res, reason, start)
+	h.recordProxy(res, reason, rec)
 	return res
 }
 
-func (h *Handler) proxyBody(w http.ResponseWriter, r *http.Request, body []byte, reason string, start time.Time) proxy.Result {
+func (h *Handler) proxyBody(w http.ResponseWriter, r *http.Request, body []byte, reason string, rec *txnRec) proxy.Result {
 	res := h.upstream.Forward(w, withBody(r, body), 0)
-	h.recordProxy(res, reason, start)
+	h.recordProxy(res, reason, rec)
 	return res
 }
 
-func (h *Handler) recordProxy(res proxy.Result, reason string, start time.Time) {
+func (h *Handler) recordProxy(res proxy.Result, reason string, rec *txnRec) {
 	route := routeProxy
 	if res.Canceled {
 		route = routeAbandoned
 	}
+	rec.route, rec.reason, rec.status = route, reason, res.Status
 	requests.WithLabelValues(route, reason).Inc()
-	duration.WithLabelValues(routeProxy).Observe(time.Since(start).Seconds())
+	duration.WithLabelValues(routeProxy).Observe(time.Since(rec.start).Seconds())
 	if res.Err != nil {
 		upstreamErrors.Inc()
 	}
 }
 
-func (h *Handler) write(w http.ResponseWriter, ans answer, route, outcome string, start time.Time) {
+func (h *Handler) write(w http.ResponseWriter, ans answer, route, outcome string, rec *txnRec) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(ans.status)
 	_, _ = w.Write(ans.body)
+	rec.route, rec.reason, rec.status = route, outcome, ans.status
 	requests.WithLabelValues(route, outcome).Inc()
-	duration.WithLabelValues(route).Observe(time.Since(start).Seconds())
+	duration.WithLabelValues(route).Observe(time.Since(rec.start).Seconds())
 }
 
 func jsonError(status int, errcode, msg string) answer {

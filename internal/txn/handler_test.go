@@ -1,6 +1,7 @@
 package txn
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -468,5 +469,45 @@ func waitFor(t *testing.T, cond func() bool) {
 			t.Fatal("condition not met in time")
 		}
 		time.Sleep(time.Millisecond)
+	}
+}
+
+// At debug level every transaction gets exactly one line saying where it went
+// and why; at info, none.
+func TestDebugLogsEachTransaction(t *testing.T) {
+	r := newRig(t, config.Mode{Kind: config.ModeNative})
+	var buf bytes.Buffer
+	r.h.log = zerolog.New(&buf).Level(zerolog.DebugLevel)
+
+	send(t, r.h, "remote.example", "t1", eduOnly)
+	send(t, r.h, "remote.example", "t2", withPDU)
+
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("%d log lines for 2 transactions:\n%s", len(lines), buf.String())
+	}
+	var native, proxied map[string]any
+	_ = json.Unmarshal([]byte(lines[0]), &native)
+	_ = json.Unmarshal([]byte(lines[1]), &proxied)
+
+	if native["route"] != "native" || native["reason"] != "ok" || native["origin"] != "remote.example" ||
+		native["txn_id"] != "t1" || native["verified"] != true {
+		t.Errorf("native line: %s", lines[0])
+	}
+	edus, _ := native["edus"].(string)
+	for _, want := range []string{"m.typing:forward@edu-w=1", "m.presence:drop_presence_untracked=1", "m.receipt:forward@edu-w=1"} {
+		if !strings.Contains(edus, want) {
+			t.Errorf("edus %q lacks %q", edus, want)
+		}
+	}
+	if proxied["route"] != "proxy" || proxied["reason"] != reasonHasPDUs {
+		t.Errorf("proxied line: %s", lines[1])
+	}
+
+	buf.Reset()
+	r.h.log = zerolog.New(&buf).Level(zerolog.InfoLevel)
+	send(t, r.h, "remote.example", "t3", eduOnly)
+	if buf.Len() != 0 {
+		t.Errorf("info level logged a routine transaction: %s", buf.String())
 	}
 }

@@ -87,6 +87,31 @@ mounted read-only, so they cannot drift:
 3. Move to `shadow`, then `canary:N`, then `native`, checking the metrics below
    at each step.
 
+## Logging
+
+At `info` it logs startup, the database role check, the first EDU of each type
+Synapse has no handler for, shadow disagreements, and failures. Nothing per
+transaction: at 5 requests a second, that belongs in metrics.
+
+At `debug` every transaction gets one line, with these fields:
+
+| Field | Meaning |
+|---|---|
+| `route` | native, proxy or abandoned |
+| `reason` | what happened, or why it was proxied |
+| `status` | the HTTP status |
+| `origin` | the origin, and whether it was verified |
+| `txn_id` | the transaction id |
+| `edus` | for native: the EDU plan, e.g. `m.presence:drop_presence_untracked=3 m.typing:forward@av-edu-worker=1` |
+
+In shadow mode each evaluation also gets a "Shadow evaluation" line, with the
+decision and the plan.
+
+## Metrics and dashboard
+
+Prometheus job: `av-goinbound-worker-1:9200`. The Grafana dashboard is in
+`deploy/grafana/` (import `goinbound-worker.json`).
+
 ## Verifying each step
 
 ```promql

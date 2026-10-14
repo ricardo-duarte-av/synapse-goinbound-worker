@@ -144,6 +144,7 @@ func (s *shadowRunner) evaluate(job shadowJob) {
 	vr := s.h.verifier.Verify(req)
 	if !vr.OK() {
 		shadowDecisions.WithLabelValues("proxy", reasonAuth).Inc()
+		s.logDecision(job, job.state.origin, "proxy", reasonAuth, nil)
 		return
 	}
 	if vr.Origin != job.state.origin {
@@ -154,6 +155,7 @@ func (s *shadowRunner) evaluate(job shadowJob) {
 	}
 	if s.h.whitelist != nil && !s.h.whitelist[vr.Origin] {
 		shadowDecisions.WithLabelValues("proxy", reasonWhitelist).Inc()
+		s.logDecision(job, vr.Origin, "proxy", reasonWhitelist, nil)
 		return
 	}
 
@@ -163,14 +165,14 @@ func (s *shadowRunner) evaluate(job shadowJob) {
 	}
 	d := s.h.decide(ctx, vr.Origin, job.txnID, job.body, false, state)
 
+	decision, reason := "native", "ok"
 	switch {
 	case d.proxyReason != "":
-		shadowDecisions.WithLabelValues("proxy", d.proxyReason).Inc()
+		decision, reason = "proxy", d.proxyReason
 	case d.stored != nil:
 		// A genuine retry of a transaction Synapse already answered.
-		shadowDecisions.WithLabelValues("native", "stored_response").Inc()
+		reason = "stored_response"
 	default:
-		shadowDecisions.WithLabelValues("native", "ok").Inc()
 		edu.Record("shadow", d.steps)
 		if job.synapseStatus != http.StatusOK {
 			shadowDisagreements.WithLabelValues(strconv.Itoa(job.synapseStatus)).Inc()
@@ -179,4 +181,19 @@ func (s *shadowRunner) evaluate(job shadowJob) {
 				Msg("Shadow: we would have answered 200, Synapse did not")
 		}
 	}
+	shadowDecisions.WithLabelValues(decision, reason).Inc()
+	s.logDecision(job, vr.Origin, decision, reason, d.steps)
+}
+
+func (s *shadowRunner) logDecision(job shadowJob, origin, decision, reason string, steps []edu.Step) {
+	e := s.h.log.Debug()
+	if !e.Enabled() {
+		return
+	}
+	e = e.Str("decision", decision).Str("reason", reason).Str("origin", origin).
+		Str("txn_id", job.txnID).Int("synapse_status", job.synapseStatus)
+	if len(steps) > 0 {
+		e = e.Str("edus", summarize(steps))
+	}
+	e.Msg("Shadow evaluation")
 }
