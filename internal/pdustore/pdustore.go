@@ -25,6 +25,9 @@ var Tables = []string{
 	"event_to_state_groups", "state_groups_state", "state_group_edges", "event_edges",
 	"event_auth_chains", "event_auth_chain_links", "server_signature_keys", "redactions",
 	"event_forward_extremities", "current_state_events", "partial_state_rooms",
+	// The push check.
+	"local_current_membership", "room_memberships", "push_rules", "push_rules_enable",
+	"ignored_users", "event_relations", "thread_subscriptions", "room_depth", "event_push_actions", "receipts_linearized",
 }
 
 // Store reads PDUs and state.

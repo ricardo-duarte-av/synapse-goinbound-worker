@@ -131,7 +131,7 @@ flush()
 
 # ---------------------------------------------------------------- PDU shadow
 row("PDU shadow (modes.pdu: shadow)")
-ts("PDU checks by outcome", "Each PDU Synapse accepted, once persisted: 'signatures' (event ID, content hash, signatures) and 'state_auth' (state resolution, auth verdict, resulting state). 'received' covers PDUs that never got that far. Any mismatch is a disagreement with Synapse worth reading in the log.",
+ts("PDU checks by outcome", "Each PDU Synapse accepted, once persisted: 'signatures' (event ID, content hash, signatures), 'state_auth' (state resolution, auth verdict, resulting state), 'soft_fail' and 'push' (push action rows). 'received' covers PDUs that never got that far. Any mismatch is a disagreement with Synapse worth reading in the log.",
    [(f'sum by (check, outcome) (rate(goinbound_pdu_shadow_total{{{G}}}{R}))', "{{check}} {{outcome}}")], unit="ops", stack=True)
 ts("Mismatches and errors by reason", "",
    [(f'sum by (check, outcome, reason) (increase(goinbound_pdu_shadow_total{{{G}, outcome=~"mismatch|error|raise"}}{R}))', "{{check}} {{outcome}}: {{reason}}")], decimals=0)

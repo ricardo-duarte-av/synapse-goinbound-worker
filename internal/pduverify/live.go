@@ -233,11 +233,27 @@ func (l *Live) check(j *job) {
 		}
 		return l.v.SoftFail(ctx, id, j.snap)
 	}
+	var before pdu.StateMap
+	replay := func(ctx context.Context, id string) *Result {
+		r := l.v.Replay(ctx, id)
+		if r.Outcome == OutcomeMatch {
+			// Push reads the state before from Replay, when it agrees
+			// with Synapse's.
+			before = r.Before()
+		}
+		return r
+	}
+	pushCheck := func(ctx context.Context, id string) *Result {
+		if j.snap == nil {
+			return &Result{EventID: id, Outcome: OutcomeSkipped, Reason: "no snapshot"}
+		}
+		return l.v.Push(ctx, id, before, j.snap)
+	}
 
 	for _, c := range []struct {
 		name string
 		run  func(context.Context, string) *Result
-	}{{"signatures", l.v.CheckSigs}, {"state_auth", l.v.Replay}, {"soft_fail", softFail}} {
+	}{{"signatures", l.v.CheckSigs}, {"state_auth", replay}, {"soft_fail", softFail}, {"push", pushCheck}} {
 		res := c.run(ctx, eventID)
 		res.EventID = eventID
 		l.recordResult(c.name, res)
@@ -247,7 +263,7 @@ func (l *Live) check(j *job) {
 		}
 		ev.Str("check", c.name).Str("outcome", res.Outcome).Str("reason", res.Reason).
 			Str("type", res.Type).Bool("synapse_rejected", res.SynapseRej).Bool("our_rejected", res.OurRej).
-			Strs("state_diff", res.StateDiff).Int64("resolve_ms", res.ResolveMS).
+			Strs("state_diff", res.StateDiff).Strs("push_diff", res.PushDiff).Int64("resolve_ms", res.ResolveMS).
 			Msg("PDU shadow")
 	}
 }
@@ -324,6 +340,7 @@ func reasonLabel(outcome, reason string) string {
 		"no state group for the event", "state resolution v1", "signing key not held", "signing key replaced",
 		"rejected", "partial state room", "snapshot taken after the event", "backfilled", "missing prevs", "race",
 		"no snapshot", "soft fail",
+		"push not configured", "invite", "min depth", "no state before", "pruned", "redacted", "push",
 		"unparseable", "event id", "content hash", "state resolution", "auth",
 	} {
 		if strings.HasPrefix(reason, known) {
@@ -347,7 +364,7 @@ func (l *Live) recordResult(check string, r *Result) {
 var (
 	liveChecks = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "goinbound_pdu_shadow_total",
-		Help: "PDU shadow checks by check (received, signatures, state_auth, soft_fail), outcome and reason.",
+		Help: "PDU shadow checks by check (received, signatures, state_auth, soft_fail, push), outcome and reason.",
 	}, []string{"check", "outcome", "reason"})
 	liveDropped = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "goinbound_pdu_shadow_dropped_total",

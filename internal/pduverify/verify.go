@@ -42,7 +42,17 @@ type Result struct {
 	StateDiff    []string `json:"state_diff,omitempty"`
 	ResolveMS    int64    `json:"resolve_ms,omitempty"`
 	AuthMismatch bool     `json:"auth_mismatch,omitempty"`
+	PushDiff     []string `json:"push_diff,omitempty"`
+	// PushRows counts the push action rows compared, notifying ones apart.
+	PushRows   int `json:"push_rows,omitempty"`
+	PushNotify int `json:"push_notify,omitempty"`
+
+	// before is Replay's state before the event, for the push check.
+	before pdu.StateMap
 }
+
+// Before is the state before the event, when Replay computed it.
+func (r *Result) Before() pdu.StateMap { return r.before }
 
 // Verifier replays events through the Go port of Synapse's PDU handling and
 // compares the outcome with what Synapse decided and stored.
@@ -50,6 +60,7 @@ type Verifier struct {
 	st     *pdustore.Store
 	groups *groupCache
 	opts   stateres.Options
+	push   *PushConfig
 }
 
 // New builds a Verifier over st.
@@ -155,6 +166,7 @@ func (s *Verifier) Replay(ctx context.Context, id string) *Result {
 		return res.fail(OutcomeError, "auth: "+err.Error())
 	}
 	res.OurRej, res.OurReason = rej, why
+	res.before = before
 
 	// 4. State after, against Synapse's.
 	stored, err := s.groups.get(ctx, s.st, ownGroup)

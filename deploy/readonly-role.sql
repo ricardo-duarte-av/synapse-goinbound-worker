@@ -35,17 +35,27 @@ GRANT SELECT ON
     event_edges,
     event_forward_extremities,
     event_json,
+    event_push_actions,
+    event_relations,
     event_to_state_groups,
     events,
+    ignored_users,
+    local_current_membership,
     partial_state_rooms,
+    push_rules,
+    push_rules_enable,
+    receipts_linearized,
     received_transactions,
     redactions,
     rejections,
+    room_depth,
+    room_memberships,
     rooms,
     server_keys_json,
     server_signature_keys,
     state_group_edges,
-    state_groups_state
+    state_groups_state,
+    thread_subscriptions
 TO goinbound_ro;
 
 -- Belt and braces: reject writes at the transaction level.

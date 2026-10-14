@@ -109,6 +109,22 @@ things that are not derivable from the code.
   Synapse holds was stored after the event arrived is not evidence of anything.
 - **A failing content hash on a stored event is normal** when the event is
   already in its redacted form: Synapse redacts on receipt and stores that.
+- **Port push against the deployed Synapse (1.162), not the checkout.** The
+  `/home/daedric/synapse` checkout is 1.163. At 1.162 there is no
+  `msc4075_enabled` switch (its rules always apply). Every experimental flag
+  defaults to False, msc4210 included. Read the code with
+  `git show v1.162.0:<path>`.
+- **`event_push_actions` loses rows, which is not a disagreement.**
+  - A read receipt of any type, at or past the event, deletes the reader's
+    non-highlight rows.
+  - A redaction deletes all of the event's rows.
+  - Rows a day old are deleted once summarised.
+
+  The push check allows for all three. Before them, 98% of its "mismatches"
+  were missing stored rows.
+- **homeserver.yaml has duplicate keys** (`msc3814_enabled` twice).
+  PyYAML keeps the last one; yaml.v3 refuses the whole file, so
+  `experimental_features` is decoded by hand (`lastWins`).
 
 ## Traps
 

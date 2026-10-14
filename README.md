@@ -239,5 +239,31 @@ event of the room was persisted between the snapshot and this one, the
 current state may have moved, and the case is counted as `race` rather than
 compared.
 
-Not yet built: push actions. Missing prev events are not fetched:
-the shadow compares only what Synapse computed from state it already held.
+Push actions are checked last. The shadow reproduces
+`BulkPushRuleEvaluator._action_for_event_by_user` against each user's push
+rules (`internal/push`, a port of Synapse's Rust evaluator, with the base
+rules dumped from the deployed 1.162). Then it compares the rows with
+`event_push_actions`. The inputs are:
+
+- the local members, minus the sender and appservice-exclusive users;
+- the member count, power levels and related events;
+- the thread and thread subscriptions;
+- the history-visibility filter;
+- Synapse's unread rule (`msc2654`).
+
+Who is in the room is read from current state. So the check is skipped as
+`race` when any member event has landed since the snapshot. Other skips:
+
+- `redacted`: a redaction deletes the event's rows;
+- `pruned`: summarised rows are deleted after a day;
+- `invite`: invite filtering (MSC4155) is not ported.
+
+A reader's receipt at or past the event deletes their non-highlight rows,
+so those are left out of the comparison.
+`pdusweep -push` runs the same check over recent stored events. On
+2026-10-14, 1,251 events with rows matched exactly, across v1-v12:
+2,574 rows, 1,410 of them notifying. A deliberate mutation (unread always
+false) produced 402 mismatches.
+
+Missing prev events are not fetched: the shadow compares only what Synapse
+computed from state it already held.

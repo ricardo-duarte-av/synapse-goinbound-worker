@@ -148,3 +148,9 @@ func pyIntString(s string) (int64, error) {
 func pyEqualString(v gjson.Result, s string) bool {
 	return v.Type == gjson.String && v.Str == s
 }
+
+// PyInt is Python's int() over a decoded JSON value; see pyInt.
+func PyInt(v gjson.Result) (int64, error) { return pyInt(v) }
+
+// IsPyInt is type(v) is int.
+func IsPyInt(v gjson.Result) bool { return isPyInt(v) }

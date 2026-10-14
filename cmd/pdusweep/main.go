@@ -30,9 +30,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pdu"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pdustore"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pduverify"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/stateres"
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/synapsecfg"
 )
 
 func main() {
@@ -49,6 +51,8 @@ func main() {
 	cross := flag.Bool("crosscheck", false, "compute auth chain differences both ways and report any disagreement as an error")
 	idsFile := flag.String("ids", "", "replay the event IDs in this file (one per line) instead of sampling")
 	sigs := flag.Bool("sigs", false, "check event IDs, content hashes and signatures instead of auth and state")
+	pushFlag := flag.Bool("push", false, "check push actions against event_push_actions instead of auth and state (recent events: rows are pruned after a day or so)")
+	homeserver := flag.String("homeserver", "/opt/matrix/synapse/synapse/homeserver.yaml", "homeserver.yaml, for -push")
 	flag.Parse()
 
 	ctx := context.Background()
@@ -67,6 +71,27 @@ func main() {
 	check := sw.Replay
 	if *sigs {
 		check = sw.CheckSigs
+	}
+	if *pushFlag {
+		hs, err := synapsecfg.Load(*homeserver)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		pc, err := pduverify.PushConfigFor(hs)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		sw.EnablePush(pc)
+		check = func(ctx context.Context, id string) *pduverify.Result {
+			r := sw.Replay(ctx, id)
+			var before pdu.StateMap
+			if r.Outcome == pduverify.OutcomeMatch {
+				before = r.Before()
+			}
+			return sw.Push(ctx, id, before, nil)
+		}
 	}
 
 	if *event != "" {
@@ -156,9 +181,15 @@ func report(version string, results []*pduverify.Result, took time.Duration) {
 	counts := map[string]int{}
 	reasons := map[string]int{}
 	resolved, authMis, stateMis := 0, 0, 0
+	pushEvents, pushRows, pushNotify := 0, 0, 0
 	var resolveMS []int64
 	for _, r := range results {
 		counts[r.Outcome]++
+		if r.Outcome == pduverify.OutcomeMatch && r.PushRows > 0 {
+			pushEvents++
+			pushRows += r.PushRows
+			pushNotify += r.PushNotify
+		}
 		if r.Resolved {
 			resolved++
 			resolveMS = append(resolveMS, r.ResolveMS)
@@ -178,6 +209,9 @@ func report(version string, results []*pduverify.Result, took time.Duration) {
 	fmt.Printf("v%-3s n=%-4d match=%-4d mismatch=%-3d (auth %d, state %d) raise=%-3d error=%-3d skipped=%-4d resolved=%-4d %s\n",
 		version, len(results), counts[pduverify.OutcomeMatch], counts[pduverify.OutcomeMismatch], authMis, stateMis,
 		counts[pduverify.OutcomeRaise], counts[pduverify.OutcomeError], counts[pduverify.OutcomeSkipped], resolved, took.Round(time.Millisecond))
+	if pushEvents > 0 {
+		fmt.Printf("      push: %d matching events had rows: %d rows, %d notifying\n", pushEvents, pushRows, pushNotify)
+	}
 	if len(resolveMS) > 0 {
 		sort.Slice(resolveMS, func(i, j int) bool { return resolveMS[i] < resolveMS[j] })
 		var sum int64

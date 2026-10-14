@@ -220,7 +220,14 @@ func buildHandler(ctx context.Context, cfg *config.Config, up *proxy.Proxy, log 
 			db.Close()
 			return nil, noop, fmt.Errorf("pdu shadow: %w", err)
 		}
-		live = pduverify.NewLive(pduverify.New(pst, stateres.Options{}), pst, pduverify.LiveOptions{
+		pv := pduverify.New(pst, stateres.Options{})
+		if pc, err := pduverify.PushConfigFor(hs); err != nil {
+			// The other checks do not need it.
+			log.Warn().Err(err).Msg("PDU shadow: push check off")
+		} else {
+			pv.EnablePush(pc)
+		}
+		live = pduverify.NewLive(pv, pst, pduverify.LiveOptions{
 			Concurrency: cfg.PDUShadow.Concurrency,
 			Queue:       cfg.PDUShadow.Queue,
 			MaxWait:     time.Duration(cfg.PDUShadow.MaxWaitSeconds) * time.Second,

@@ -1259,7 +1259,7 @@
     {
       "type": "timeseries",
       "title": "PDU checks by outcome",
-      "description": "Each PDU Synapse accepted, once persisted: 'signatures' (event ID, content hash, signatures) and 'state_auth' (state resolution, auth verdict, resulting state). 'received' covers PDUs that never got that far. Any mismatch is a disagreement with Synapse worth reading in the log.",
+      "description": "Each PDU Synapse accepted, once persisted: 'signatures' (event ID, content hash, signatures), 'state_auth' (state resolution, auth verdict, resulting state), 'soft_fail' and 'push' (push action rows). 'received' covers PDUs that never got that far. Any mismatch is a disagreement with Synapse worth reading in the log.",
       "id": 22,
       "datasource": {
         "type": "prometheus",

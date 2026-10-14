@@ -1099,3 +1099,9 @@ func signedMessage(raw []byte) ([]byte, error) {
 func ed25519Verify(key, message, sig []byte) bool {
 	return ed25519.Verify(ed25519.PublicKey(key), message, sig)
 }
+
+// UserPowerLevel is get_user_power_level (event_auth.py:1116), for callers
+// outside the auth rules: push evaluation reads the sender's level with it.
+func UserPowerLevel(userID string, auth AuthState) (int64, error) {
+	return getUserPowerLevel(userID, auth)
+}
