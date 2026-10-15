@@ -30,6 +30,8 @@ Prometheus must scrape the worker first. Add this beside `gopro-worker` in
 | Routing | Every transaction by route and reason, and latency by route. |
 | EDUs | EDUs by type and action, forwards by destination writer, forward latency, outcomes and retries. |
 | Shadow evaluation | What native mode would have done, and disagreements with Synapse. |
+| Write mode decisions | The decide check (write mode's decision against what Synapse did), its deferrals by reason, the policy server checks, and v2.1 set-order ties. |
+| Write mode | Only with modes.pdu canary or native: events by outcome, write latency, persister calls, device resyncs, queue pruning. |
 | Synapse, for comparison | Synapse's own fed_send_edu counts per writer, which must not change across the move to native. The Python worker's /send rate, which should fall by ~96%. |
 | Database | Each named query's rate and latency, and ACL lookups by source. |
 | Process | CPU, memory and goroutines, beside the Python inbound worker's. |

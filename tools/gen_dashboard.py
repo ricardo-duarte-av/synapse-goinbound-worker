@@ -152,6 +152,31 @@ ts("PDU checker memory", "Resident memory, and the state group cache: its entrie
     (f'sum by (how) (rate(goinbound_pdu_state_cache_loads_total{{{G}}}{R})) * 60', "loads/min {{how}}")], w=8)
 flush()
 
+# ---------------------------------------------------------------- Write mode
+row("Write mode decisions (checked in the shadow)")
+ts("Decide vs Synapse", "Write mode's decision for each PDU, made before Synapse handled it, compared once Synapse persisted it: rejected, soft-failed, the state group before, the push rows, and the fed_send_events entry. A mismatch is a write-mode bug: read the log line with check=decide.",
+   [(f'sum by (outcome) (rate(goinbound_pdu_shadow_total{{{G}, check="decide"}}{R}))', "{{outcome}}")], unit="ops", w=8, stack=True)
+ts("Decide: deferred and skipped, by reason", "'deferred: ...' is what write mode would leave staged for Synapse's worker (missing prevs, v1 state resolution, invites...). The rest are comparisons that cannot be made.",
+   [(f'sum by (reason) (rate(goinbound_pdu_shadow_total{{{G}, check="decide", outcome="skipped"}}{R}))', "{{reason}}")], unit="ops", w=8)
+ts("Policy servers, and v2.1 set-order ties", "'policy': what Synapse did with a room's policy server, against our verdict. 'policy_ask': our own request to the policy server, against Synapse's answer. Ties: v2.1 forwards reachability Synapse would compute differently in another process.",
+   [(f'sum by (check, outcome, reason) (rate(goinbound_pdu_shadow_total{{{G}, check=~"policy|policy_ask", reason!="Synapse did not ask"}}{R}))', "{{check}} {{outcome}}: {{reason}}"),
+    (f'sum(rate(goinbound_pdu_chain_forward_ties_total{{{G}}}{R}))', "v2.1 set-order ties")], unit="ops", w=8)
+flush()
+
+row("Write mode (modes.pdu: canary:N or native)")
+ts("Events handled by write mode", "Staged events by outcome: persisted, rejected and soft_failed (all three persisted); ignored and dropped (persisted by nobody, as Synapse does); deferred and error (left staged for Synapse's worker).",
+   [(f'sum by (outcome) (rate(goinbound_write_events_total{{{G}}}{R}))', "{{outcome}}")], unit="ops", w=8, stack=True)
+ts("Write latency", "Deciding and persisting one event, and staging to unstaging (Synapse's pdu_process_time).",
+   [(f'histogram_quantile(0.5, sum by (le) (rate(goinbound_write_event_seconds_bucket{{{G}}}{R})))', "decide+persist p50"),
+    (f'histogram_quantile(0.99, sum by (le) (rate(goinbound_write_event_seconds_bucket{{{G}}}{R})))', "decide+persist p99"),
+    (f'histogram_quantile(0.99, sum by (le) (rate(goinbound_write_pdu_process_seconds_bucket{{{G}}}{R})))', "staged to done p99")], unit="s", w=8)
+ts("Persister calls, device resyncs, pruning", "fed_send_events by persister and result (a conflict is a partial-state room un-partial-stated mid-way), its p99, device resyncs asked for, and events pruned from queues over 100.",
+   [(f'sum by (writer, result) (rate(goinbound_replication_send_events_duration_seconds_count{{{G}}}{R}))', "{{writer}} {{result}}"),
+    (f'histogram_quantile(0.99, sum by (le) (rate(goinbound_replication_send_events_duration_seconds_bucket{{{G}}}{R})))', "fed_send_events p99 (s)"),
+    (f'sum(rate(goinbound_write_device_resyncs_total{{{G}}}{R}))', "device resyncs"),
+    (f'sum(rate(goinbound_write_pruned_total{{{G}}}{R}))', "pruned from queues")], w=8)
+flush()
+
 # ---------------------------------------------------------------- Synapse
 row("Synapse, for comparison")
 ts("Synapse: EDUs received over replication, by writer", "ReplicationFederationSendEduRestServlet on each Synapse instance: every EDU forwarded to it, from the Python worker or from us. Moving to native must not change this.",
