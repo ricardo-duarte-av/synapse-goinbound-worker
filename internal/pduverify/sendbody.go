@@ -76,7 +76,8 @@ func encodeStateDict(m pdu.StateMap) []stateRow {
 // (federation_base.py:320) and calculate_context_info, which is what
 // get_pdu_json sends: unsigned stripped to its whitelist, age turned into
 // age_ts against the request time, and replaces_state added for a state
-// event that replaces another.
+// event that replaces another. unsigned is always there, {} when the PDU had
+// none: the Rust event's field is serde(default) and always serialized.
 func pduEventDict(raw []byte, received time.Time, replaces string) (map[string]any, error) {
 	d := json.NewDecoder(bytes.NewReader(raw))
 	d.UseNumber()
@@ -108,12 +109,12 @@ func pduEventDict(raw []byte, received time.Time, replaces string) (map[string]a
 		}
 		ev["unsigned"] = kept
 	}
+	unsigned, _ := ev["unsigned"].(map[string]any)
+	if unsigned == nil {
+		unsigned = map[string]any{}
+		ev["unsigned"] = unsigned
+	}
 	if replaces != "" {
-		unsigned, _ := ev["unsigned"].(map[string]any)
-		if unsigned == nil {
-			unsigned = map[string]any{}
-			ev["unsigned"] = unsigned
-		}
 		unsigned["replaces_state"] = replaces
 	}
 	return ev, nil

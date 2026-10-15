@@ -25,8 +25,8 @@ func TestPDUEventDict(t *testing.T) {
 			`{"type":"m.room.message","unsigned":{}}`},
 		{"a bool age is", `{"type":"m.room.message","unsigned":{"age":true}}`, "",
 			`{"type":"m.room.message","unsigned":{"age_ts":999999}}`},
-		{"no unsigned stays without", `{"type":"m.room.topic"}`, "",
-			`{"type":"m.room.topic"}`},
+		{"no unsigned becomes {}", `{"type":"m.room.topic"}`, "",
+			`{"type":"m.room.topic","unsigned":{}}`},
 		{"replaces_state", `{"type":"m.room.topic","state_key":""}`, "$old",
 			`{"type":"m.room.topic","state_key":"","unsigned":{"replaces_state":"$old"}}`},
 	}
