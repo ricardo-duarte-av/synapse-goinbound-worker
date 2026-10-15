@@ -908,3 +908,15 @@ func (s *Verifier) softFailedWithGap(ctx context.Context, ev *pdu.Event, snap *p
 func (s *Verifier) ResolveStates(ctx context.Context, roomID string, rv *pdu.RoomVersion, sets []pdu.StateMap) (pdu.StateMap, error) {
 	return stateres.ResolveWith(ctx, roomID, rv, sets, s.st, s.opts)
 }
+
+// RedactedStagedEvent is the copy Synapse stages of a received PDU whose
+// content hash fails: _check_sigs_and_hash returns prune_event of it
+// (redact, keeping unsigned's age_ts and replaces_state), with internal
+// metadata {"redacted": true}, and never asks a policy server about it.
+func RedactedStagedEvent(raw []byte, rv *pdu.RoomVersion, received time.Time) ([]byte, error) {
+	staged, err := StagedEvent(raw, received, "", nil)
+	if err != nil {
+		return nil, err
+	}
+	return pdu.Redact(staged, rv)
+}

@@ -2,7 +2,6 @@ package pduverify
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -59,6 +58,7 @@ type job struct {
 	decision  *Decision
 	decideErr string
 	staged    []byte
+	redacted  bool // staged pruned: its content hash failed
 }
 
 // LiveOptions tunes the shadow.
@@ -278,23 +278,26 @@ func (l *Live) prepare(j *job) {
 // decide makes write mode's decision for the PDU, on the copy write mode
 // would stage.
 func (l *Live) decide(ctx context.Context, j *job, rv *pdu.RoomVersion) {
-	if ok, err := pdu.CheckContentHash(j.raw); err != nil || !ok {
-		j.decideErr = "redacted on receipt"
+	meta := []byte(`{}`)
+	var staged []byte
+	var err error
+	if ok, herr := pdu.CheckContentHash(j.raw); herr != nil {
+		j.decideErr = "content hash"
 		return
+	} else if !ok {
+		staged, err = RedactedStagedEvent(j.raw, rv, j.received)
+		meta = []byte(`{"redacted":true}`)
+		j.redacted = true
+	} else {
+		staged, err = StagedEvent(j.raw, j.received, "", nil)
 	}
-	dict, err := pduEventDict(j.raw, j.received, "")
 	if err != nil {
 		j.decideErr = "event_from_pdu_json"
 		return
 	}
-	staged, err := json.Marshal(dict)
-	if err != nil {
-		j.decideErr = err.Error()
-		return
-	}
 	j.staged = staged
 	d, err := l.v.Decide(ctx, DecideInput{
-		Origin: j.origin, EventJSON: staged, Metadata: []byte(`{}`), EventID: j.eventID,
+		Origin: j.origin, EventJSON: staged, Metadata: meta, EventID: j.eventID,
 		Room: rv, OurServer: l.server, Cache: l.cache, Snapshot: j.snap,
 	})
 	if err != nil {
@@ -476,7 +479,7 @@ func (l *Live) check(j *job) {
 			return &Result{EventID: id, Outcome: OutcomeSkipped, Reason: j.decideErr}
 		}
 		staged := j.staged
-		if answer != nil && j.decision != nil {
+		if answer != nil && j.decision != nil && !j.redacted {
 			if answer.Sigs == nil {
 				// Staged as a policy refusal: soft-failed.
 				j.decision.SoftFailed = true

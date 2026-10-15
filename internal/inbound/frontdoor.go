@@ -61,6 +61,8 @@ type plannedPDU struct {
 	room   string
 	rv     *pdu.RoomVersion
 	policy pduverify.PolicyVerdict
+	// redacted: the content hash fails, so the pruned copy is staged.
+	redacted bool
 }
 
 // PlanPDUs checks a transaction's PDUs as _handle_pdus_in_txn and
@@ -147,8 +149,7 @@ func (f *FrontDoor) PlanPDUs(ctx context.Context, origin string, pdus []json.Raw
 // and either no policy server or a decided one.
 func (f *FrontDoor) checkSigs(ctx context.Context, pp *plannedPDU) string {
 	ok, err := pdu.CheckContentHash(pp.raw)
-	if err != nil || !ok {
-		// Synapse redacts it and stages the pruned copy; not ported.
+	if err != nil {
 		return "pdu_content_hash"
 	}
 	ev := pp.ev
@@ -162,6 +163,12 @@ func (f *FrontDoor) checkSigs(ctx context.Context, pp *plannedPDU) string {
 		}
 		// Synapse's error text is its own to write.
 		return "pdu_bad_signature"
+	}
+	if !ok {
+		// "Event content has been tampered, redacting": the pruned copy
+		// is staged, and no policy server is asked.
+		pp.redacted = true
+		return ""
 	}
 	v, err := f.d.Verifier.Policy(ctx, pp.raw, ev, f.d.Server)
 	if err != nil {
@@ -207,6 +214,16 @@ func (p *Plan) Run(ctx context.Context) map[string]json.RawMessage {
 
 func (p *Plan) stage(ctx context.Context, pp *plannedPDU) json.RawMessage {
 	f := p.f
+	if pp.redacted {
+		staged, err := pduverify.RedactedStagedEvent(pp.raw, pp.rv, p.at)
+		if err != nil {
+			return errorEntry(err)
+		}
+		if err := f.d.Processor.Received(ctx, p.origin, pp.room, pp.id, staged, []byte(`{"redacted":true}`)); err != nil {
+			return errorEntry(err)
+		}
+		return json.RawMessage(`{}`)
+	}
 	meta := []byte(`{}`)
 	var sigs map[string]string
 	if pp.policy.Verdict == pduverify.PolicyAsk {
