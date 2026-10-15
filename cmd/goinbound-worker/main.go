@@ -400,6 +400,14 @@ func (p persister) SendEvents(ctx context.Context, roomID string, entries []json
 	return err
 }
 
+func (p persister) ResyncDevices(ctx context.Context, userID string) error {
+	w := synapsecfg.MainProcessInstanceName
+	if len(p.writers.DeviceLists) > 0 {
+		w = p.writers.DeviceLists[0]
+	}
+	return p.c.MultiUserDeviceResync(ctx, w, []string{userID})
+}
+
 // frontDoor adapts write mode's front door to txn.PDUServer.
 type frontDoor struct{ f *inbound.FrontDoor }
 

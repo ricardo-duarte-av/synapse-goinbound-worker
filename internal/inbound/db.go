@@ -33,6 +33,8 @@ var Grants = []dbrole.Grant{
 	{Table: "state_groups_pending_deletion", Privileges: "SELECT, UPDATE"},
 	{Table: "event_push_actions_staging", Privileges: "SELECT, INSERT, DELETE"},
 	{Table: "event_failed_pull_attempts", Privileges: "SELECT, INSERT, UPDATE, DELETE"},
+	// mark_remote_users_device_caches_as_stale, before a device resync.
+	{Table: "device_lists_remote_resync", Privileges: "SELECT, INSERT"},
 }
 
 // Sequences are granted USAGE: new state group IDs, and the pending

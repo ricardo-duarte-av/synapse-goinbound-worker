@@ -56,6 +56,7 @@ Only these, through a role granted exactly them (`internal/dbrole`):
 | `state_groups_pending_deletion` | update (the bump) |
 | `event_push_actions_staging` | insert, delete |
 | `event_failed_pull_attempts` | upsert, delete |
+| `device_lists_remote_resync` | upsert (insertion values only) |
 
 Everything else goes through Synapse's replication endpoints:
 `fed_send_events` (the persister), `fed_send_edu` (the writers),
@@ -74,7 +75,7 @@ Everything else goes through Synapse's replication endpoints:
 | 6 | `/send` answer per PDU, and `received_transactions` | **done** (`inbound.FrontDoor`, `txn`); a transaction whose PDUs we cannot answer exactly (unknown keys, bad signatures, redaction on receipt) is Synapse's |
 | 7 | The writes: state groups, push staging, `fed_send_events`, unstage | **done**; a failed persist is left staged for Synapse, where Synapse would log it and drop the event |
 | 8 | Missing prevs and state: `/get_missing_events`, `/state_ids`, `/event`, outliers, failed pull attempts | todo |
-| 9 | Side effects: device resync, guest kicks (`allow_guest_access: false` here, so kicks should find no guests) | todo |
+| 9 | Side effects: device resync, guest kicks | **done**: device resync (stale mark, then `multi_user_device_resync`); guest-access changes are deferred to Synapse (`allow_guest_access: false` here) |
 | 10 | Rejected events' context | **done** (same groups, `rejected` set; mapped to the group before) |
 | 11 | State resolution v1: v1 rooms carry 1.4% of events (2,740 of the last 200k, 2026-10-15) | todo |
 | 12 | Verification in reverse: after Go writes, re-derive and compare | todo |

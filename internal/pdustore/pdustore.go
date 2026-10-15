@@ -30,6 +30,29 @@ var Tables = []string{
 	// The push check.
 	"local_current_membership", "room_memberships", "push_rules", "push_rules_enable",
 	"ignored_users", "event_relations", "thread_subscriptions", "room_depth", "event_push_actions", "receipts_linearized",
+	// Write mode's device resync check.
+	"device_lists_remote_cache",
+}
+
+const qCachedDevices = `SELECT device_id, content FROM device_lists_remote_cache WHERE user_id = $1`
+
+// CachedDevices is get_cached_devices_for_user: the remote user's devices
+// we hold, by device ID, as stored.
+func (s *Store) CachedDevices(ctx context.Context, userID string) (map[string][]byte, error) {
+	rows, err := s.pool.Query(ctx, qCachedDevices, userID)
+	if err != nil {
+		return nil, fmt.Errorf("pdustore: cached devices: %w", err)
+	}
+	defer rows.Close()
+	out := map[string][]byte{}
+	for rows.Next() {
+		var id, content string
+		if err := rows.Scan(&id, &content); err != nil {
+			return nil, err
+		}
+		out[id] = []byte(content)
+	}
+	return out, rows.Err()
 }
 
 // Store reads PDUs and state.

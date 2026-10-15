@@ -194,6 +194,9 @@ type Decision struct {
 	Replaces string
 	// Push are the push action rows to stage.
 	Push []PushRow
+	// ResyncDevices is a sender whose devices to resync once the event is
+	// persisted: an encrypted event from a device or key we do not hold.
+	ResyncDevices string
 	// pushRows are Push, for the decide check.
 	pushRows map[string]pushRow
 	// pushSkipped says Synapse computes no rows (min depth).
@@ -353,6 +356,21 @@ func (s *Verifier) Decide(ctx context.Context, in DecideInput) (*Decision, error
 	}
 	if d.SoftFailed {
 		d.Metadata["soft_failed"] = true
+	}
+
+	if !rej && ev.Type == "m.room.guest_access" && gjson.GetBytes(ev.JSON, "content.guest_access").Str != "can_join" {
+		// _maybe_kick_guest_users kicks local guests; not ported.
+		d.Defer = "guest access change"
+		return d, nil
+	}
+	if !rej && ev.Type == "m.room.encrypted" {
+		resync, err := s.needsDeviceResync(ctx, ev)
+		if err != nil {
+			return nil, err
+		}
+		if resync {
+			d.ResyncDevices = ev.Sender
+		}
 	}
 
 	// _run_push_actions_and_persist_event: not for rejected events, nor
@@ -718,3 +736,64 @@ func StagedEvent(raw []byte, received time.Time, policyServer string, policySigs
 	}
 	return b, nil
 }
+
+// needsDeviceResync is _process_received_pdu's check of an encrypted event's
+// device_id and sender_key against the sender's cached devices
+// (federation_event.py:1520).
+func (s *Verifier) needsDeviceResync(ctx context.Context, ev *pdu.Event) (bool, error) {
+	cached, err := s.st.CachedDevices(ctx, ev.Sender)
+	if err != nil {
+		return false, err
+	}
+	return deviceResyncNeeded(ev.Content, cached), nil
+}
+
+// deviceResyncNeeded decides on the event's content and the sender's cached
+// devices.
+func deviceResyncNeeded(content gjson.Result, cached map[string][]byte) bool {
+	deviceID := pdu.Get(content, "device_id")
+	senderKey := pdu.Get(content, "sender_key")
+	resync := false
+	var device []byte
+	if deviceID.Exists() && deviceID.Type != gjson.Null {
+		// cached_devices.get(device_id): a non-string device_id is no key.
+		if deviceID.Type == gjson.String {
+			device = cached[deviceID.Str]
+		}
+		if device == nil {
+			resync = true
+		}
+	}
+	if senderKey.Exists() && senderKey.Type != gjson.Null {
+		var current []gjson.Result
+		switch {
+		case device != nil && pyTruthy(gjson.ParseBytes(device)):
+			keys := gjson.GetBytes(device, "keys.keys")
+			if pdu.Get(content, "algorithm").Str == "m.megolm.v1.aes-sha2" && pdu.Get(content, "algorithm").Type == gjson.String {
+				current = []gjson.Result{pdu.Get(keys, "curve25519:"+deviceID.Str)}
+			} else {
+				keys.ForEach(func(_, v gjson.Result) bool { current = append(current, v); return true })
+			}
+		case deviceID.Exists() && deviceID.Type != gjson.Null && pyTruthy(deviceID):
+			// A device ID we hold no keys for.
+		default:
+			for _, d := range cached {
+				gjson.GetBytes(d, "keys.keys").ForEach(func(_, v gjson.Result) bool { current = append(current, v); return true })
+			}
+		}
+		found := false
+		for _, k := range current {
+			if k.Exists() && jsonEqualRaw(k.Raw, senderKey.Raw) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			resync = true
+		}
+	}
+	return resync
+}
+
+// jsonEqualRaw is Python's == on two decoded JSON values.
+func jsonEqualRaw(a, b string) bool { return sameJSON(a, b) }

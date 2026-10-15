@@ -21,9 +21,11 @@ type Deciding interface {
 	Decide(ctx context.Context, in pduverify.DecideInput) (*pduverify.Decision, error)
 }
 
-// Persisting sends events to the room's persister (fed_send_events).
+// Persisting sends events to the room's persister (fed_send_events), and
+// asks the device list writer to resync a remote user's devices.
 type Persisting interface {
 	SendEvents(ctx context.Context, roomID string, entries []json.RawMessage) error
+	ResyncDevices(ctx context.Context, userID string) error
 }
 
 // Reading is the state the processor reads outside its own tables.
@@ -245,6 +247,25 @@ func (p *Processor) processRoom(room string, lock *Lock, latestOrigin, latestID 
 	}
 }
 
+// resync is _resync_device, in the background: mark the user's devices
+// stale, then ask the device list writer to resync them.
+func (p *Processor) resync(user string) {
+	p.wg.Add(1)
+	go func() {
+		defer p.wg.Done()
+		ctx, cancel := context.WithTimeout(p.ctx, time.Minute)
+		defer cancel()
+		resyncs.Inc()
+		if err := p.db.MarkDevicesStale(ctx, user); err != nil {
+			p.log.Warn().Err(err).Str("user_id", user).Msg("Failed to resync device")
+			return
+		}
+		if err := p.persist.ResyncDevices(ctx, user); err != nil {
+			p.log.Warn().Err(err).Str("user_id", user).Msg("Failed to resync device")
+		}
+	}()
+}
+
 func (p *Processor) deferRoom(room, origin, eventID string) {
 	p.mu.Lock()
 	p.deferred[room] = deferral{origin: origin, eventID: eventID, at: time.Now()}
@@ -315,6 +336,9 @@ func (p *Processor) handle(ctx context.Context, room string, rv *pdu.RoomVersion
 		log.Warn().Err(err).Msg("Write mode: persisting failed; leaving the event to Synapse")
 		handled.WithLabelValues("error").Inc()
 		return outcomeDefer
+	}
+	if d.ResyncDevices != "" && d.Rejected == "" {
+		p.resync(d.ResyncDevices)
 	}
 	handleTime.Observe(time.Since(start).Seconds())
 	switch {
@@ -398,6 +422,10 @@ var (
 		Name:    "goinbound_write_pdu_process_seconds",
 		Help:    "Time from staging to unstaging, as Synapse's pdu_process_time.",
 		Buckets: prometheus.ExponentialBuckets(0.01, 2, 16),
+	})
+	resyncs = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "goinbound_write_device_resyncs_total",
+		Help: "Device resyncs asked for, for encrypted events from unknown devices or keys.",
 	})
 	pruned = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "goinbound_write_pruned_total",

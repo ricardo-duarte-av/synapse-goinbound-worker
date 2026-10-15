@@ -62,6 +62,8 @@ func (f *fakePersist) SendEvents(_ context.Context, _ string, entries []json.Raw
 	return nil
 }
 
+func (f *fakePersist) ResyncDevices(context.Context, string) error { return nil }
+
 type fakeRead struct{}
 
 func (fakeRead) RoomVersion(context.Context, string) (string, error) { return "1", nil }

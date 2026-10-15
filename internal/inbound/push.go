@@ -77,3 +77,18 @@ func (d *DB) SetTxnResponse(ctx context.Context, origin, txnID string, code int,
 	}
 	return nil
 }
+
+// qMarkDevicesStale is mark_remote_users_device_caches_as_stale's upsert,
+// insertion values only.
+const qMarkDevicesStale = `
+	INSERT INTO device_lists_remote_resync (user_id, added_ts) VALUES ($1, $2)
+	ON CONFLICT (user_id) DO NOTHING`
+
+// MarkDevicesStale records that a remote user's cached devices may be out
+// of date.
+func (d *DB) MarkDevicesStale(ctx context.Context, userID string) error {
+	if _, err := d.pool.Exec(ctx, qMarkDevicesStale, userID, d.nowMS()); err != nil {
+		return fmt.Errorf("inbound: mark devices stale: %w", err)
+	}
+	return nil
+}

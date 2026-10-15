@@ -333,3 +333,24 @@ var (
 		Help: "Replication requests retried, by instance and reason.",
 	}, []string{"writer", "reason"})
 )
+
+// MultiUserDeviceResync asks instance (the first device_lists writer) to
+// resync remote users' devices: ReplicationMultiUserDevicesResyncRestServlet,
+// as DeviceListWorkerUpdater.multi_user_device_resync calls it.
+func (c *Client) MultiUserDeviceResync(ctx context.Context, instance string, userIDs []string) error {
+	t, ok := c.targets[canonical(instance)]
+	if !ok {
+		return fmt.Errorf("replication: instance %q is not in instance_map", instance)
+	}
+	body, err := json.Marshal(struct {
+		UserIDs []string `json:"user_ids"`
+	}{userIDs})
+	if err != nil {
+		return err
+	}
+	_, err = c.post(ctx, t, t.base+"/_synapse/replication/multi_user_device_resync/"+txnID(), body)
+	if err != nil {
+		return fmt.Errorf("replication: multi_user_device_resync to %s: %w", t.name, err)
+	}
+	return nil
+}
