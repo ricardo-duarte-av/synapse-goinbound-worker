@@ -67,6 +67,7 @@ Everything else goes through Synapse's replication endpoints:
 |---|---|---|
 | 1 | Decisions match Synapse: signatures, policy, auth, state, state groups, soft-fail, push, `fed_send_events` body | **done** (shadow, 0 mismatches) |
 | 2 | v2.1 forwards reachability over several link batches | **done** (`c851f57`) |
+| 2b | Decide: write mode's decision for a staged event, through the state cache, checked live against Synapse (`decide` check) | **in shadow**; defers missing prevs, de-outliering, invites' push, v1 state res, partial state, content-hash failures |
 | 3 | Write role with exactly the tables above | **done** (`dbrole` writes, `inbound.Grants`); not yet created at startup |
 | 4 | Staging, room lock, purge read lock, interoperable with Python | **done** (`internal/inbound`: Synapse's SQL, tested on a throwaway PostgreSQL) |
 | 5 | Room queue processor and the one-minute sweep | todo |

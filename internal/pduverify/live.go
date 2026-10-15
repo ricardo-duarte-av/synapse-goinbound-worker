@@ -2,6 +2,7 @@ package pduverify
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -30,6 +31,7 @@ type Live struct {
 	server   string
 	acl      ACL
 	asker    PolicyAsker
+	cache    *StateCache
 	onRes    func(string, *Result)
 	wg       sync.WaitGroup
 	ctx      context.Context
@@ -53,6 +55,9 @@ type job struct {
 	policy   PolicyVerdict
 	// answer is the policy server's answer to us, when Synapse asks it.
 	answer chan PolicyAnswer
+	// decision is write mode's, made after the snapshot.
+	decision  *Decision
+	decideErr string
 }
 
 // LiveOptions tunes the shadow.
@@ -102,7 +107,7 @@ func NewLive(v *Verifier, st *pdustore.Store, o LiveOptions, log zerolog.Logger)
 		o.PrevWait = time.Minute
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	l := &Live{v: v, st: st, log: log, queue: make(chan *job, o.Queue), maxWait: o.MaxWait, prevWait: o.PrevWait, server: o.ServerName, acl: o.ACL, asker: o.Policy, onRes: o.OnResult, ctx: ctx, cancel: cancel}
+	l := &Live{v: v, st: st, log: log, queue: make(chan *job, o.Queue), maxWait: o.MaxWait, prevWait: o.PrevWait, server: o.ServerName, acl: o.ACL, asker: o.Policy, cache: NewStateCache(), onRes: o.OnResult, ctx: ctx, cancel: cancel}
 	for i := 0; i < o.Concurrency; i++ {
 		l.wg.Add(1)
 		go l.work()
@@ -264,6 +269,38 @@ func (l *Live) prepare(j *job) {
 	if err == nil {
 		j.snap = snap
 	}
+	if err == nil && !snap.EventPresent && l.server != "" {
+		l.decide(ctx, j, rv)
+	}
+}
+
+// decide makes write mode's decision for the PDU, on the copy write mode
+// would stage.
+func (l *Live) decide(ctx context.Context, j *job, rv *pdu.RoomVersion) {
+	if ok, err := pdu.CheckContentHash(j.raw); err != nil || !ok {
+		j.decideErr = "redacted on receipt"
+		return
+	}
+	dict, err := pduEventDict(j.raw, j.received, "")
+	if err != nil {
+		j.decideErr = "event_from_pdu_json"
+		return
+	}
+	staged, err := json.Marshal(dict)
+	if err != nil {
+		j.decideErr = err.Error()
+		return
+	}
+	d, err := l.v.Decide(ctx, DecideInput{
+		Origin: j.origin, EventJSON: staged, Metadata: []byte(`{}`), EventID: j.eventID,
+		Room: rv, OurServer: l.server, Cache: l.cache, Snapshot: j.snap,
+	})
+	if err != nil {
+		j.decideErr = "decide failed"
+		l.log.Debug().Err(err).Str("event_id", j.eventID).Msg("PDU shadow: decide failed")
+		return
+	}
+	j.decision = d
 }
 
 // rescindsInvite is the shape of event Synapse considers, when not in the
@@ -432,6 +469,17 @@ func (l *Live) check(j *job) {
 		}
 		return l.v.SendBody(ctx, in)
 	}
+	decideCheck := func(ctx context.Context, id string) *Result {
+		if j.decideErr != "" {
+			return &Result{EventID: id, Outcome: OutcomeSkipped, Reason: j.decideErr}
+		}
+		if answer != nil && answer.Sigs == nil && j.decision != nil {
+			// Staged as a policy refusal: soft-failed.
+			j.decision.SoftFailed = true
+			j.decision.pushRows = map[string]pushRow{}
+		}
+		return l.v.CheckDecision(ctx, id, j.decision, j.snap)
+	}
 	pushCheck := func(ctx context.Context, id string) *Result {
 		if j.snap == nil {
 			return &Result{EventID: id, Outcome: OutcomeSkipped, Reason: "no snapshot"}
@@ -442,7 +490,7 @@ func (l *Live) check(j *job) {
 	for _, c := range []struct {
 		name string
 		run  func(context.Context, string) *Result
-	}{{"signatures", l.v.CheckSigs}, {"policy", policyCheck}, {"policy_ask", policyAsk}, {"state_auth", replay}, {"state_groups", stateGroups}, {"soft_fail", softFail}, {"send_body", sendBody}, {"push", pushCheck}} {
+	}{{"signatures", l.v.CheckSigs}, {"policy", policyCheck}, {"policy_ask", policyAsk}, {"state_auth", replay}, {"state_groups", stateGroups}, {"soft_fail", softFail}, {"send_body", sendBody}, {"push", pushCheck}, {"decide", decideCheck}} {
 		res := c.run(ctx, eventID)
 		res.EventID = eventID
 		switch c.name {
@@ -571,6 +619,10 @@ var reasonLabels = []string{
 	"no policy server", "policy event", "signed", "asked, signed", "asked, refused", "Synapse asks",
 	"policy event redacted", "policy server host not looked up", "policy lookup", "policy did not match", "policy answer", "policy",
 	"Synapse did not ask", "both refused", "same signature", "shutting down",
+	"decide", "deferred: missing prevs", "deferred: partial state room", "deferred: push for an invite",
+	"deferred: state resolution v1", "deferred: auth", "deferred: soft fail", "deferred: push",
+	"deferred: prev event without state group", "deferred: not in room, invite rescission", "deferred",
+	"no decision", "decide failed", "not persisted",
 	"push not configured", "invite", "min depth", "no state before", "pruned", "redacted", "push",
 	"unparseable", "event id", "content hash", "state resolution", "auth",
 }

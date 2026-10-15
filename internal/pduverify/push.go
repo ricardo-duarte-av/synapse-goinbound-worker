@@ -60,6 +60,12 @@ type pushRow struct {
 // current state, so the check is skipped when any member event has been
 // persisted since -- the reads would not be what Synapse saw.
 func (s *Verifier) Push(ctx context.Context, id string, before pdu.StateMap, snap *pdustore.Snapshot) *Result {
+	return s.pushCheck(ctx, id, before, snap, nil)
+}
+
+// pushCheck is Push, comparing given rows when not nil instead of computing
+// them: the decide check passes write mode's.
+func (s *Verifier) pushCheck(ctx context.Context, id string, before pdu.StateMap, snap *pdustore.Snapshot, given map[string]pushRow) *Result {
 	res := &Result{EventID: id}
 	if s.push == nil {
 		return res.fail(OutcomeSkipped, "push not configured")
@@ -166,7 +172,9 @@ func (s *Verifier) Push(ctx context.Context, id string, before pdu.StateMap, sna
 		return res.fail(OutcomeError, err.Error())
 	}
 	ours := map[string]pushRow{}
-	if !softFailed {
+	if given != nil {
+		ours = given
+	} else if !softFailed {
 		// filter_event_for_clients_with_state shows a soft-failed event
 		// to nobody, so it has no rows.
 		ours, err = s.pushRows(ctx, ev, before, snap)
