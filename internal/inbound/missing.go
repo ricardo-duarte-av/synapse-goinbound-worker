@@ -129,12 +129,10 @@ func (p *Processor) processPulledEvents(ctx context.Context, origin string, rv *
 	}
 	var fresh []*fedfetch.Pulled
 	for _, e := range events {
-		if se := existing[e.ID]; se != nil {
-			if !se.Outlier {
-				continue
-			}
-			return fmt.Errorf("%w: de-outliering %s", errUncertain, e.ID)
+		if se := existing[e.ID]; se != nil && !se.Outlier {
+			continue
 		}
+		// An outlier is de-outliered: processed as new.
 		fresh = append(fresh, e)
 	}
 	freshIDs := make([]string, len(fresh))

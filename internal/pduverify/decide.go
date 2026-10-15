@@ -256,14 +256,12 @@ func (s *Verifier) Decide(ctx context.Context, in DecideInput) (*Decision, error
 			d.Defer = "already held, unparseable"
 			return d, nil
 		}
-		if se := got[in.EventID]; se != nil {
-			if !se.Outlier {
-				d.Ignore = "already seen"
-				return d, nil
-			}
-			d.Defer = "de-outliering"
+		if se := got[in.EventID]; se != nil && !se.Outlier {
+			d.Ignore = "already seen"
 			return d, nil
 		}
+		// Held only as an outlier: "De-outliering event", handled as new;
+		// the persister turns the outlier into a timeline event.
 	} else if in.Snapshot.EventPresent {
 		d.Defer = "held when the snapshot was taken"
 		return d, nil
