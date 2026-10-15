@@ -143,13 +143,35 @@ func (p *Processor) processPulledEvents(ctx context.Context, origin string, rv *
 	if err != nil {
 		return err
 	}
-	if len(failed) > 0 {
-		// Synapse processes these in the background, outside the room's
-		// lock; not ported.
-		return fmt.Errorf("%w: pulled events with failed pull attempts", errUncertain)
-	}
-	sort.SliceStable(fresh, func(i, j int) bool { return fresh[i].Event.Depth < fresh[j].Event.Depth })
+	var retried, first []*fedfetch.Pulled
 	for _, e := range fresh {
+		if failed[e.ID] {
+			retried = append(retried, e)
+		} else {
+			first = append(first, e)
+		}
+	}
+	byDepth := func(es []*fedfetch.Pulled) {
+		sort.SliceStable(es, func(i, j int) bool { return es[i].Event.Depth < es[j].Event.Depth })
+	}
+	if len(retried) > 0 {
+		// "Process previously failed backfill events in the background to
+		// not waste time on something that is likely to fail again": not
+		// awaited, and holding nothing, as Synapse's background process.
+		byDepth(retried)
+		p.wg.Add(1)
+		go func() {
+			defer p.wg.Done()
+			for _, e := range retried {
+				if err := p.processPulledEvent(p.ctx, origin, rv, e); err != nil {
+					p.log.Info().Err(err).Str("event_id", e.ID).Msg("Write mode: retrying a pulled event failed")
+					return
+				}
+			}
+		}()
+	}
+	byDepth(first)
+	for _, e := range first {
 		if err := p.processPulledEvent(ctx, origin, rv, e); err != nil {
 			return err
 		}

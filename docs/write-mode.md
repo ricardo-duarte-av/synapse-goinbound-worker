@@ -74,7 +74,7 @@ Everything else goes through Synapse's replication endpoints:
 | 5 | Room queue processor and the one-minute sweep | **done** (`inbound.Processor`); a deferred event stays staged, with its room, for Synapse's sweep |
 | 6 | `/send` answer per PDU, and `received_transactions` | **done** (`inbound.FrontDoor`, `txn`); a transaction whose PDUs we cannot answer exactly (unknown keys, bad signatures, redaction on receipt) is Synapse's |
 | 7 | The writes: state groups, push staging, `fed_send_events`, unstage | **done**; a failed persist is left staged for Synapse, where Synapse would log it and drop the event |
-| 8 | Missing prevs and state: `/get_missing_events`, `/state_ids`, `/event`, outliers, failed pull attempts | **ported, unverified** (`write.missing_events: fetch`; default `defer`). Deferred still: a pulled event that needs a key we lack, has a bad signature or hash, was seen as an outlier, or has failed pulls (Synapse retries those in the background). The shadow cannot check this path: Synapse's own fetches happen out of its sight |
+| 8 | Missing prevs and state: `/get_missing_events`, `/state_ids`, `/event`, outliers, failed pull attempts | **ported, unverified** (`write.missing_events: fetch`; default `defer`). Deferred still: a pulled event with a bad signature or content hash. Events with failed pulls are retried in the background, as Synapse does. The shadow cannot check this path: Synapse's own fetches happen out of its sight |
 | 9 | Side effects: device resync, guest kicks | **done**: device resync (stale mark, then `multi_user_device_resync`); guest-access changes are deferred to Synapse (`allow_guest_access: false` here) |
 | 10 | Rejected events' context | **done** (same groups, `rejected` set; mapped to the group before) |
 | 11 | State resolution v1 | **done** (ported earlier, `a4f5864`); rejected events now left out, as v1's state_map_factory does. v1 forks are rare: 8 in the last 2M stream orderings, all matching |
@@ -82,6 +82,12 @@ Everything else goes through Synapse's replication endpoints:
 | 15 | Push on invites of local users: MSC4380 and MSC4155 invite config | **done** (`inviteAllowed`); checked live by the push check |
 | 12 | Verification in reverse: after Go writes, re-derive and compare | todo |
 | 13 | A/B replay on two copies of a snapshot | todo |
+
+## Known gaps
+
+- Partial state rooms are deferred: one here (`!cURbafjkfsMDVwdRDQ:matrix.org`), with
+  no traffic. Under `native` its events would stay staged.
+- Guest-access changes are deferred (Synapse kicks local guests; there are none).
 
 ## Rollout
 
