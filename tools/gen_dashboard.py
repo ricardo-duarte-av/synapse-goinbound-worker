@@ -175,6 +175,9 @@ ts("Persister calls, device resyncs, pruning", "fed_send_events by persister and
     (f'histogram_quantile(0.99, sum by (le) (rate(goinbound_replication_send_events_duration_seconds_bucket{{{G}}}{R})))', "fed_send_events p99 (s)"),
     (f'sum(rate(goinbound_write_device_resyncs_total{{{G}}}{R}))', "device resyncs"),
     (f'sum(rate(goinbound_write_pruned_total{{{G}}}{R}))', "pruned from queues")], w=8)
+ts("Origins in backoff marked as up", "write.mark_origins_up: an origin we had backed off sent us a transaction, so it was reset as Synapse's worker does (destinations, the caches stream row and its RDATA, REMOTE_SERVER_UP). db_error and publish_error send the next ones to Synapse for 5 minutes; 'proxied' is those, and every one while the setting is off.",
+   [(f'sum by (outcome) (rate(goinbound_origin_up_total{{{G}}}{R}))', "{{outcome}}"),
+    (f'sum(rate(goinbound_requests_total{{{G}, reason="origin_in_backoff"}}{R}))', "proxied")], unit="ops", w=8)
 flush()
 
 # ---------------------------------------------------------------- Synapse

@@ -2237,13 +2237,88 @@
       ]
     },
     {
-      "type": "row",
-      "title": "Synapse, for comparison",
+      "type": "timeseries",
+      "title": "Origins in backoff marked as up",
+      "description": "write.mark_origins_up: an origin we had backed off sent us a transaction, so it was reset as Synapse's worker does (destinations, the caches stream row and its RDATA, REMOTE_SERVER_UP). db_error and publish_error send the next ones to Synapse for 5 minutes; 'proxied' is those, and every one while the setting is off.",
       "id": 37,
-      "collapsed": false,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "gridPos": {
         "x": 0,
         "y": 86,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (outcome) (rate(goinbound_origin_up_total{job=~\"$job\"}[$bucket]))",
+          "legendFormat": "{{outcome}}",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(goinbound_requests_total{job=~\"$job\", reason=\"origin_in_backoff\"}[$bucket]))",
+          "legendFormat": "proxied",
+          "range": true,
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Synapse, for comparison",
+      "id": 38,
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 94,
         "w": 24,
         "h": 1
       },
@@ -2253,14 +2328,14 @@
       "type": "timeseries",
       "title": "Synapse: EDUs received over replication, by writer",
       "description": "ReplicationFederationSendEduRestServlet on each Synapse instance: every EDU forwarded to it, from the Python worker or from us. Moving to native must not change this.",
-      "id": 38,
+      "id": 39,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 0,
-        "y": 87,
+        "y": 95,
         "w": 8,
         "h": 8
       },
@@ -2317,14 +2392,14 @@
       "type": "timeseries",
       "title": "Synapse: /send reaching the Python worker",
       "description": "FederationSendServlet on the Python inbound worker. Falls by ~96% once EDU-only transactions are native.",
-      "id": 39,
+      "id": 40,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 8,
-        "y": 87,
+        "y": 95,
         "w": 8,
         "h": 8
       },
@@ -2392,14 +2467,14 @@
       "type": "timeseries",
       "title": "Synapse: inbound EDUs and PDUs at the Python worker",
       "description": "What the Python worker still parses.",
-      "id": 40,
+      "id": 41,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 16,
-        "y": 87,
+        "y": 95,
         "w": 8,
         "h": 8
       },
@@ -2466,11 +2541,11 @@
     {
       "type": "row",
       "title": "Database",
-      "id": 41,
+      "id": 42,
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 95,
+        "y": 103,
         "w": 24,
         "h": 1
       },
@@ -2480,14 +2555,14 @@
       "type": "timeseries",
       "title": "Queries by name and result",
       "description": "Every query is a primary-key lookup: txn_state once per native transaction, current_server_acl for typing and receipts (cached 5s per room), server_keys on a key-cache miss.",
-      "id": 42,
+      "id": 43,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 0,
-        "y": 96,
+        "y": 104,
         "w": 8,
         "h": 8
       },
@@ -2544,14 +2619,14 @@
       "type": "timeseries",
       "title": "Query latency (p99)",
       "description": "",
-      "id": 43,
+      "id": 44,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 8,
-        "y": 96,
+        "y": 104,
         "w": 8,
         "h": 8
       },
@@ -2608,14 +2683,14 @@
       "type": "timeseries",
       "title": "ACL lookups by source",
       "description": "cached, db, error, redacted (a redacted ACL sends the transaction to Synapse).",
-      "id": 44,
+      "id": 45,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 16,
-        "y": 96,
+        "y": 104,
         "w": 8,
         "h": 8
       },
@@ -2671,11 +2746,11 @@
     {
       "type": "row",
       "title": "Process: goinbound vs the Python inbound worker",
-      "id": 45,
+      "id": 46,
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 104,
+        "y": 112,
         "w": 24,
         "h": 1
       },
@@ -2685,14 +2760,14 @@
       "type": "timeseries",
       "title": "CPU",
       "description": "Cores used.",
-      "id": 46,
+      "id": 47,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 0,
-        "y": 105,
+        "y": 113,
         "w": 8,
         "h": 8
       },
@@ -2761,14 +2836,14 @@
       "type": "timeseries",
       "title": "Resident memory",
       "description": "",
-      "id": 47,
+      "id": 48,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 8,
-        "y": 105,
+        "y": 113,
         "w": 8,
         "h": 8
       },
@@ -2836,14 +2911,14 @@
       "type": "timeseries",
       "title": "Goroutines and restarts",
       "description": "Goroutines should track request concurrency, not grow. A restart is a step in process_start_time_seconds.",
-      "id": 48,
+      "id": 49,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 16,
-        "y": 105,
+        "y": 113,
         "w": 8,
         "h": 8
       },
