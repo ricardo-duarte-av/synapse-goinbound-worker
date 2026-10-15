@@ -153,7 +153,8 @@ func NewHandler(o Options) *Handler {
 		responses:      o.Responses,
 		log:            o.Log,
 	}
-	if h.mode.Kind == config.ModeShadow {
+	if h.mode.Kind == config.ModeShadow || h.mode.Kind == config.ModeCanary {
+		// In canary mode, the origins not selected are still evaluated.
 		h.shadow = newShadowRunner(h, o.Shadow)
 	}
 	return h
@@ -259,6 +260,15 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, body []byte, txn
 	}
 
 	d := h.decide(r.Context(), origin, txnID, body, true, h.store.GetTxnState)
+	if d.proxyReason == reasonCanary && h.shadow != nil {
+		// Not ours to answer, but still evaluated against Synapse's answer,
+		// with the transaction's state read before Synapse sees it.
+		pre := h.shadow.start(r, txnID)
+		res := h.proxyBody(w, r, body, d.proxyReason, rec)
+		h.shadow.submit(r, body, txnID, res.Status, pre)
+		h.coord.end(origin, f, nil)
+		return
+	}
 	if d.proxyReason != "" {
 		h.proxyBody(w, r, body, d.proxyReason, rec)
 		h.coord.end(origin, f, nil)

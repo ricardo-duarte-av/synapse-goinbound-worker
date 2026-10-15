@@ -662,3 +662,26 @@ func TestWriteModeCanaryLeavesOtherOriginsToSynapse(t *testing.T) {
 		t.Errorf("proxied %d, planned %d", r.up.count(), ps.planned.Load())
 	}
 }
+
+// In canary mode, an origin not selected is still evaluated, its state read
+// before Synapse sees the transaction.
+func TestCanaryShadowsOriginsNotSelected(t *testing.T) {
+	r := newRig(t, config.Mode{Kind: config.ModeCanary, CanaryPercent: 0})
+	var dbBeforeUpstream atomic.Bool
+	r.up.onForward = func() {
+		waitFor(t, func() bool { r.store.mu.Lock(); defer r.store.mu.Unlock(); return r.store.calls == 1 })
+		dbBeforeUpstream.Store(true)
+	}
+	rec := send(t, r.h, "remote.example", "t1", eduOnly)
+	if !strings.Contains(rec.Body.String(), `"from":"synapse"`) {
+		t.Fatalf("not Synapse's answer: %s", rec.Body)
+	}
+	if !dbBeforeUpstream.Load() {
+		t.Error("state was not read before the request reached Synapse")
+	}
+	// Once by the handler, once by the shadow.
+	waitFor(t, func() bool { return r.verifier.calls.Load() == 2 })
+	if len(r.sender.list()) != 0 {
+		t.Errorf("forwarded EDUs for an origin not selected: %v", r.sender.list())
+	}
+}
