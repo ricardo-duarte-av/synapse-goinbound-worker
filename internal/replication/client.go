@@ -141,7 +141,7 @@ func (c *Client) SendEDU(ctx context.Context, instance, eduType, origin string, 
 	start := time.Now()
 	connectFailures := 0
 	for {
-		err = c.post(ctx, t, url, body)
+		_, err = c.post(ctx, t, url, body)
 		switch {
 		case err == nil:
 			observe(t.name, eduType, "ok", start)
@@ -168,10 +168,10 @@ func (c *Client) SendEDU(ctx context.Context, instance, eduType, origin string, 
 	}
 }
 
-func (c *Client) post(ctx context.Context, t *target, url string, body []byte) error {
+func (c *Client) post(ctx context.Context, t *target, url string, body []byte) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if c.secret != "" {
@@ -179,15 +179,75 @@ func (c *Client) post(ctx context.Context, t *target, url string, body []byte) e
 	}
 	resp, err := t.http.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
-	// The answer is {} plus stream positions; only the status matters.
-	b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
 	if resp.StatusCode/100 != 2 {
-		return &HTTPError{Status: resp.StatusCode, Body: string(b)}
+		return nil, &HTTPError{Status: resp.StatusCode, Body: string(b)}
 	}
-	return nil
+	return b, nil
+}
+
+// ErrPartialStateConflict is the persister's 409: the room was un-partial
+// stated while the event's context was computed, and Synapse recomputes it.
+var ErrPartialStateConflict = errors.New("replication: partial state conflict")
+
+// SendEvents persists events through instance, as
+// ReplicationFederationSendEventsRestServlet expects them: {"events": [...],
+// "backfilled": ..., "room_id": ...}, each entry already serialized. It
+// returns the max_stream_id the persister answers with. Retries are
+// SendEDU's: the same txn_id on every attempt, which the persister answers
+// from its response cache.
+func (c *Client) SendEvents(ctx context.Context, instance, roomID string, entries []json.RawMessage, backfilled bool) (int64, error) {
+	t, ok := c.targets[canonical(instance)]
+	if !ok {
+		return 0, fmt.Errorf("replication: instance %q is not in instance_map", instance)
+	}
+	body, err := json.Marshal(struct {
+		Events     []json.RawMessage `json:"events"`
+		Backfilled bool              `json:"backfilled"`
+		RoomID     string            `json:"room_id"`
+	}{entries, backfilled, roomID})
+	if err != nil {
+		return 0, fmt.Errorf("replication: encode events: %w", err)
+	}
+	url := t.base + "/_synapse/replication/fed_send_events/" + txnID()
+
+	start := time.Now()
+	connectFailures := 0
+	for {
+		b, err := c.post(ctx, t, url, body)
+		var he *HTTPError
+		switch {
+		case err == nil:
+			observeEvents(t.name, "ok", start)
+			var resp struct {
+				MaxStreamID int64 `json:"max_stream_id"`
+			}
+			if err := json.Unmarshal(b, &resp); err != nil {
+				return 0, fmt.Errorf("replication: fed_send_events answer: %w", err)
+			}
+			return resp.MaxStreamID, nil
+		case ctx.Err() != nil:
+			observeEvents(t.name, "timeout", start)
+			return 0, fmt.Errorf("replication: fed_send_events to %s: %w", t.name, ctx.Err())
+		case errors.As(err, &he) && he.Status == http.StatusConflict:
+			observeEvents(t.name, "conflict", start)
+			return 0, ErrPartialStateConflict
+		case isTimeout(err):
+			retries.WithLabelValues(t.name, "timeout").Inc()
+			_ = c.sleep(ctx, time.Second)
+		case isConnectError(err) && connectFailures < connectRetries:
+			retries.WithLabelValues(t.name, "connect").Inc()
+			delay := time.Second << connectFailures
+			connectFailures++
+			_ = c.sleep(ctx, delay)
+		default:
+			observeEvents(t.name, "error", start)
+			return 0, fmt.Errorf("replication: fed_send_events to %s: %w", t.name, err)
+		}
+	}
 }
 
 // isTimeout matches Synapse's RequestTimedOutError: no answer in time, or a
@@ -247,6 +307,16 @@ func txnID() string {
 	}
 	return string(out)
 }
+
+func observeEvents(instance, result string, start time.Time) {
+	sendEventsDuration.WithLabelValues(instance, result).Observe(time.Since(start).Seconds())
+}
+
+var sendEventsDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+	Name:    "goinbound_replication_send_events_duration_seconds",
+	Help:    "Time to persist events through fed_send_events, including retries, by outcome.",
+	Buckets: []float64{.005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 30, 60},
+}, []string{"writer", "result"})
 
 func observe(instance, eduType, result string, start time.Time) {
 	sendDuration.WithLabelValues(instance, edutype.Label(eduType), result).Observe(time.Since(start).Seconds())

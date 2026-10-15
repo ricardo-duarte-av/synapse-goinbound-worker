@@ -277,3 +277,23 @@ func TestSigningKeyLine(t *testing.T) {
 		t.Error("a missing key file was not an error")
 	}
 }
+
+// Indices printed by Python's int.from_bytes(sha256(room).digest(), "little") % n.
+func TestEventsWriter(t *testing.T) {
+	writers := []string{"p0", "p1", "p2", "p3", "p4", "p5", "p6"}
+	for room, want := range map[string][4]int{
+		"!HVoAt21AG2FXdZYVmtR-kew6hj7IbfhZpPqmrSXxzrc": {1, 2, 3, 5},
+		"!c10y-N9TQGHzj6Ne3OKqn-MEO8EhfRWrD3-CD-W9AEM": {0, 1, 2, 1},
+		"!a:b": {0, 0, 3, 4},
+		"!xUW4PpAe1CmThA3r2wI8IrgwwsK006-zqWdJCljpd10": {1, 1, 4, 3},
+	} {
+		for i, n := range []int{2, 3, 5, 7} {
+			if got := (Writers{Events: writers[:n]}).EventsWriter(room); got != writers[want[i]] {
+				t.Errorf("%s over %d: %s, want %s", room, n, got, writers[want[i]])
+			}
+		}
+	}
+	if got := (Writers{}).EventsWriter("!a:b"); got != MainProcessInstanceName {
+		t.Errorf("no writers: %s", got)
+	}
+}

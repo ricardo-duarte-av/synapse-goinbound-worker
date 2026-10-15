@@ -14,9 +14,12 @@
 package synapsecfg
 
 import (
+	"crypto/sha256"
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -584,4 +587,20 @@ func lastWins(n *yaml.Node) map[string]any {
 		}
 	}
 	return out
+}
+
+// EventsWriter is the event persister for a room: _get_instance
+// (config/_base.py:1074), the room ID's sha256 read little-endian, modulo the
+// number of writers. "master" when stream_writers.events is empty.
+func (w Writers) EventsWriter(roomID string) string {
+	switch len(w.Events) {
+	case 0:
+		return MainProcessInstanceName
+	case 1:
+		return w.Events[0]
+	}
+	sum := sha256.Sum256([]byte(roomID))
+	slices.Reverse(sum[:])
+	n := new(big.Int).SetBytes(sum[:])
+	return w.Events[new(big.Int).Mod(n, big.NewInt(int64(len(w.Events)))).Int64()]
 }
