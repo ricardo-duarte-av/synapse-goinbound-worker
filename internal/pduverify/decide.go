@@ -566,7 +566,7 @@ func decodeObject(b []byte) (map[string]any, error) {
 // or not, the state group before (reused, or stored for the event as the
 // entry says), and the push rows. Synapse's group then goes into our cache
 // entry, so the cache stays the one Synapse's process holds.
-func (s *Verifier) CheckDecision(ctx context.Context, id string, d *Decision, snap *pdustore.Snapshot) *Result {
+func (s *Verifier) CheckDecision(ctx context.Context, id string, d *Decision, snap *pdustore.Snapshot, staged []byte) *Result {
 	res := &Result{EventID: id}
 	switch {
 	case d == nil:
@@ -615,8 +615,9 @@ func (s *Verifier) CheckDecision(ctx context.Context, id string, d *Decision, sn
 	if err != nil {
 		return res.fail(OutcomeSkipped, "no state group for the event")
 	}
+	// A rejected event maps to the state before it, state event or not.
 	before := own
-	if ev.IsState() {
+	if ev.IsState() && !ev.Rejected {
 		prev, hasPrev, _, err := s.st.StateDelta(ctx, own)
 		if err != nil {
 			return res.fail(OutcomeError, err.Error())
@@ -661,6 +662,27 @@ func (s *Verifier) CheckDecision(ctx context.Context, id string, d *Decision, sn
 		case OutcomeMatch:
 		default:
 			res.PushDiff = []string{"push not compared: " + p.Reason}
+		}
+	}
+	// The fed_send_events entry, with Synapse's groups.
+	if staged != nil && len(diffs) == 0 {
+		// For a rejected state event Synapse's after group is not
+		// recorded anywhere; compareEntry checks the group it maps to.
+		after := own
+		{
+			entry, err := d.sendEntry(staged, before, after)
+			if err != nil {
+				return res.fail(OutcomeError, err.Error())
+			}
+			ed, skip, err := s.compareEntry(ctx, id, ev, entry)
+			switch {
+			case err != nil:
+				return res.fail(OutcomeError, err.Error())
+			case skip != "":
+				res.PushDiff = append(res.PushDiff, "entry not compared: "+skip)
+			default:
+				diffs = append(diffs, ed...)
+			}
 		}
 	}
 	if len(diffs) > 0 {

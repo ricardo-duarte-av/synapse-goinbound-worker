@@ -58,6 +58,7 @@ type job struct {
 	// decision is write mode's, made after the snapshot.
 	decision  *Decision
 	decideErr string
+	staged    []byte
 }
 
 // LiveOptions tunes the shadow.
@@ -291,6 +292,7 @@ func (l *Live) decide(ctx context.Context, j *job, rv *pdu.RoomVersion) {
 		j.decideErr = err.Error()
 		return
 	}
+	j.staged = staged
 	d, err := l.v.Decide(ctx, DecideInput{
 		Origin: j.origin, EventJSON: staged, Metadata: []byte(`{}`), EventID: j.eventID,
 		Room: rv, OurServer: l.server, Cache: l.cache, Snapshot: j.snap,
@@ -473,12 +475,20 @@ func (l *Live) check(j *job) {
 		if j.decideErr != "" {
 			return &Result{EventID: id, Outcome: OutcomeSkipped, Reason: j.decideErr}
 		}
-		if answer != nil && answer.Sigs == nil && j.decision != nil {
-			// Staged as a policy refusal: soft-failed.
-			j.decision.SoftFailed = true
-			j.decision.pushRows = map[string]pushRow{}
+		staged := j.staged
+		if answer != nil && j.decision != nil {
+			if answer.Sigs == nil {
+				// Staged as a policy refusal: soft-failed.
+				j.decision.SoftFailed = true
+				j.decision.pushRows = map[string]pushRow{}
+				j.decision.Metadata["soft_failed"] = true
+				j.decision.Metadata["policy_server_spammy"] = true
+			} else if signed, err := addSignatures(staged, j.policy.Server, answer.Sigs); err == nil {
+				// Staged with the policy server's signature.
+				staged = signed
+			}
 		}
-		return l.v.CheckDecision(ctx, id, j.decision, j.snap)
+		return l.v.CheckDecision(ctx, id, j.decision, j.snap, staged)
 	}
 	pushCheck := func(ctx context.Context, id string) *Result {
 		if j.snap == nil {

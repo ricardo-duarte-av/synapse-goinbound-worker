@@ -176,16 +176,31 @@ func (s *Verifier) SendBody(ctx context.Context, in SendInput) *Result {
 		return res.fail(OutcomeSkipped, why)
 	}
 
-	stored := r.replay.ev
-	var diffs []string
+	diffs, skip, err := s.compareEntry(ctx, r.EventID, r.replay.ev, entry)
+	switch {
+	case err != nil:
+		return res.fail(OutcomeError, err.Error())
+	case skip != "":
+		return res.fail(OutcomeSkipped, skip)
+	case len(diffs) > 0:
+		res.Outcome, res.Reason, res.StateDiff = OutcomeMismatch, "send body", diffs
+		return res
+	}
+	res.Outcome = OutcomeMatch
+	return res
+}
+
+// compareEntry compares a fed_send_events entry with what Synapse persisted
+// for the event: the event JSON (get_dict_for_persistence), its internal
+// metadata, and the context's group.
+func (s *Verifier) compareEntry(ctx context.Context, id string, stored *pdu.Event, entry sendEntry) (diffs []string, skip string, err error) {
 	add := func(format string, a ...any) { diffs = append(diffs, fmt.Sprintf(format, a...)) }
 
-	// The event, as the persister stored it (get_dict_for_persistence).
 	var storedEv map[string]any
 	d := json.NewDecoder(bytes.NewReader(stored.JSON))
 	d.UseNumber()
 	if err := d.Decode(&storedEv); err != nil {
-		return res.fail(OutcomeError, "stored event: "+err.Error())
+		return nil, "", fmt.Errorf("stored event: %w", err)
 	}
 	oursAge, storedAge := popAgeTS(entry.Event), popAgeTS(storedEv)
 	switch {
@@ -206,9 +221,9 @@ func (s *Verifier) SendBody(ctx context.Context, in SendInput) *Result {
 		}
 	}
 
-	meta, err := s.st.InternalMetadata(ctx, r.EventID)
+	meta, err := s.st.InternalMetadata(ctx, id)
 	if err != nil {
-		return res.fail(OutcomeError, err.Error())
+		return nil, "", err
 	}
 	for _, k := range []string{"txn_id", "token_id", "device_id", "proactively_send"} {
 		if _, ok := meta[k]; ok {
@@ -216,11 +231,11 @@ func (s *Verifier) SendBody(ctx context.Context, in SendInput) *Result {
 			// device_id), or a dummy event to tidy forward extremities
 			// (proactively_send, as on our own remote joins). Never a
 			// PDU received over /send; sweeps sample them.
-			return res.fail(OutcomeSkipped, "local event")
+			return nil, "local event", nil
 		}
 	}
 	if _, ok := meta["policy_server_spammy"]; ok {
-		return res.fail(OutcomeSkipped, "policy server soft-failed it")
+		return nil, "policy server soft-failed it", nil
 	}
 	if !reflect.DeepEqual(jsonNormal(entry.InternalMetadata), jsonNormal(meta)) {
 		a, _ := json.Marshal(entry.InternalMetadata)
@@ -228,18 +243,17 @@ func (s *Verifier) SendBody(ctx context.Context, in SendInput) *Result {
 		add("internal_metadata: ours %s, stored %s", a, b)
 	}
 
-	if g, err := s.st.StateGroupForEvent(ctx, r.EventID); err != nil {
-		return res.fail(OutcomeError, err.Error())
-	} else if g != entry.Context.StateGroup {
-		add("context.state_group: ours %d, stored %d", entry.Context.StateGroup, g)
+	// A rejected event gets the state before it (_store_event_state_mappings_txn).
+	want := entry.Context.StateGroup
+	if entry.RejectedReason != nil {
+		want = entry.Context.StateGroupBeforeEvent
 	}
-
-	if len(diffs) > 0 {
-		res.Outcome, res.Reason, res.StateDiff = OutcomeMismatch, "send body", diffs
-		return res
+	if g, err := s.st.StateGroupForEvent(ctx, id); err != nil {
+		return nil, "", err
+	} else if g != want {
+		add("context.state_group: ours %d, stored %d", want, g)
 	}
-	res.Outcome = OutcomeMatch
-	return res
+	return diffs, "", nil
 }
 
 // buildSendEntry is the entry for an event the other checks agreed on. why
@@ -445,4 +459,68 @@ func (s *Verifier) SweepSendInput(ctx context.Context, replay, groups *Result) (
 	}
 	in.SoftFail = &Result{Outcome: OutcomeMatch, OurRej: softFailed}
 	return in, nil
+}
+
+// SendEntry is the fed_send_events entry for a decided event, with the
+// state groups write mode stored: before, and after (before again for a
+// non-state event, and for a rejected one only as Synapse sends it).
+// staged is the staged event JSON (get_dict()). It is what
+// UnpersistedEventContext.persist and EventContext.serialize produce.
+func (d *Decision) SendEntry(staged []byte, before, after int64) (json.RawMessage, error) {
+	e, err := d.sendEntry(staged, before, after)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(e)
+}
+
+func (d *Decision) sendEntry(staged []byte, before, after int64) (sendEntry, error) {
+	ev := d.Event
+	dec := json.NewDecoder(bytes.NewReader(staged))
+	dec.UseNumber()
+	var evDict map[string]any
+	if err := dec.Decode(&evDict); err != nil {
+		return sendEntry{}, err
+	}
+	if d.Replaces != "" {
+		u, _ := evDict["unsigned"].(map[string]any)
+		if u == nil {
+			u = map[string]any{}
+			evDict["unsigned"] = u
+		}
+		u["replaces_state"] = d.Replaces
+	}
+	dueToEvent := pdu.StateMap{}
+	if ev.IsState() {
+		dueToEvent[ev.Key()] = ev.ID
+	}
+	// _build_state_group_deltas: before -> after, then the edge into the
+	// group before that the state entry was built from.
+	deltas := []groupDelta{{From: before, To: after, Delta: encodeStateDict(dueToEvent)}}
+	if p, delta := d.Entry.PrevGroup(); p != 0 {
+		deltas = append(deltas, groupDelta{From: p, To: before, Delta: encodeStateDict(delta)})
+	}
+	var rejected *string
+	if d.Rejected != "" {
+		r := d.Rejected
+		rejected = &r
+	}
+	meta := d.Metadata
+	if meta == nil {
+		meta = map[string]any{}
+	}
+	return sendEntry{
+		Event:              evDict,
+		RoomVersion:        ev.Room.ID,
+		EventFormatVersion: ev.Room.EventFormat,
+		InternalMetadata:   meta,
+		RejectedReason:     rejected,
+		Context: sendContext{
+			StateGroup:            after,
+			StateGroupBeforeEvent: before,
+			Rejected:              rejected,
+			StateGroupDeltas:      deltas,
+			StateDeltaDueToEvent:  encodeStateDict(dueToEvent),
+		},
+	}, nil
 }
