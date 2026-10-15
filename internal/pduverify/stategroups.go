@@ -3,6 +3,7 @@ package pduverify
 import (
 	"context"
 	"fmt"
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pyset"
 	"slices"
 
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pdu"
@@ -66,7 +67,7 @@ func planOrdered(groups []int64, sets []pdu.StateMap, resolved pdu.StateMap) gro
 	tried := map[string]bool{}
 	tie := false
 	permute(slices.Clone(groups), 0, func(insertion []int64) bool {
-		order := pySetOrder(insertion)
+		order := pyset.Order(insertion)
 		key := fmt.Sprint(order)
 		if tried[key] {
 			return true

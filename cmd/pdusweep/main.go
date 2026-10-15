@@ -259,6 +259,9 @@ func report(version string, results []*pduverify.Result, took time.Duration) {
 		fmt.Printf("      state resolution ms: median %d, p90 %d, max %d, total %d\n",
 			resolveMS[len(resolveMS)/2], resolveMS[len(resolveMS)*9/10], resolveMS[len(resolveMS)-1], sum)
 	}
+	if d, mb, mb21, ties := pdustore.ChainCounts(); d > 0 {
+		fmt.Printf("      auth chain differences so far: %d, %d over more than one link batch (%d v2.1 with conflicts, %d set-order ties)\n", d, mb, mb21, ties)
+	}
 	var rs []string
 	for k := range reasons {
 		rs = append(rs, k)

@@ -107,8 +107,13 @@ things that are not derivable from the code.
   Synapse fetches links with one recursive query per thousand chains; in a
   67k-member room that is 67 queries and 18s. Breadth-first plain queries
   give the same links in a few round trips (2.6s for the whole resolution).
-  For v2.1 with >1000 chains Synapse's own answer depends on Python set
-  order; `goinbound_pdu_chain_link_batches` says how often that happens.
+  But for v2.1 with >1000 chains, forwards reachability must be walked
+  batch by batch, as Synapse walks it: a chain an earlier batch reached is
+  not walked again, so paths across batches are missed. Which chains share
+  a batch is CPython set order (`internal/pyset`). Every multi-batch
+  resolution in a big v12 room needs this (46 of 46 sampled, 2026-10-15);
+  `testdata/forward_cases.json` is Synapse's own answer on random graphs,
+  where 10 of 12 differ from walking every link at once.
 - **Signing key lookups at ~0.24/s are normal** (measured 2026-10-14, after
   warm-up from 1.3/s). Servers whose published key response has a short
   validity drop out of the in-memory cache and are re-read from Synapse's

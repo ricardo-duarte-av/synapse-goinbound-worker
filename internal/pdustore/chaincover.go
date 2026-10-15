@@ -3,11 +3,16 @@ package pdustore
 import (
 	"context"
 	"fmt"
+	"maps"
+	"math/rand/v2"
+	"slices"
 	"sort"
+	"sync/atomic"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pyset"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/stateres"
 )
 
@@ -78,6 +83,8 @@ func (s *Store) AuthChainDifference(ctx context.Context, stateSets []map[string]
 	info := map[string]position{}
 	chainToEvent := map[int64]map[int64]string{}
 	seenChains := map[int64]bool{}
+	// seenOrder is the order fetch_chain_info added chains to seen_chains.
+	var seenOrder []int64
 	ids := make([]string, 0, len(initial))
 	for id := range initial {
 		ids = append(ids, id)
@@ -96,6 +103,9 @@ func (s *Store) AuthChainDifference(ctx context.Context, stateSets []map[string]
 				return nil, nil, err
 			}
 			info[id] = p
+			if !seenChains[p.chain] {
+				seenOrder = append(seenOrder, p.chain)
+			}
 			seenChains[p.chain] = true
 			if chainToEvent[p.chain] == nil {
 				chainToEvent[p.chain] = map[int64]string{}
@@ -139,13 +149,11 @@ func (s *Store) AuthChainDifference(ctx context.Context, stateSets []map[string]
 
 	// All links reachable from the chains seen. Synapse fetches these in
 	// batches of a thousand origin chains, each answered with everything
-	// reachable from it. For the auth difference the batching changes
-	// nothing. For v2.1's forwards reachability it can: Synapse walks each
-	// batch's links separately, so a path needing links from two batches
-	// is missed -- and which links share a batch depends on Python set
-	// order, so Synapse's own answer is not reproducible then. Using every
-	// link at once gives true reachability; the batches metric says how
-	// often Synapse would have needed more than one.
+	// reachable from it. For the auth difference, and v2.1's backwards
+	// reachability, the batching changes nothing: _materialize keeps
+	// walking whenever a reach grows, and each batch holds the closure of
+	// its chains. Forwards reachability is different; see
+	// batchedForwardReach.
 	links, err := s.allChainLinks(ctx, sortedChains(seenChains))
 	if err != nil {
 		return nil, nil, err
@@ -165,12 +173,16 @@ func (s *Store) AuthChainDifference(ctx context.Context, stateSets []map[string]
 
 	if v21 {
 		// accumulate_forwards_reachable_events, then the backwards walk.
-		fwd := forwardLinks(links)
-		for _, p := range conflictedPositions {
-			if cur, ok := fwdReach[p.chain]; !ok || p.seq < cur {
-				fwdReach[p.chain] = p.seq
+		if len(seenChains) <= chainBatch {
+			// One batch: every link at once, as Synapse has them.
+			accumulateForwards(fwdReach, links, conflictedPositions)
+		} else {
+			var tie bool
+			fwdReach, tie = forwardReachAnyOrder(seenOrder, links, conflictedPositions)
+			if tie {
+				chainForwardTies.Inc()
+				chainCounts.ties.Add(1)
 			}
-			materialize(p.chain, p.seq, fwd, fwdReach, false)
 		}
 		for _, p := range conflictedPositions {
 			if _, ok := links[p.chain]; !ok {
@@ -184,6 +196,13 @@ func (s *Store) AuthChainDifference(ctx context.Context, stateSets []map[string]
 		}
 	}
 	chainBatches.Observe(float64(batches))
+	chainCounts.differences.Add(1)
+	if batches > 1 {
+		chainCounts.multiBatch.Add(1)
+		if v21 && len(conflictedPositions) > 0 {
+			chainCounts.multiBatchV21.Add(1)
+		}
+	}
 
 	// The difference: on each chain, positions reachable from some set but
 	// not from all of them.
@@ -376,6 +395,123 @@ func sortPositions(ps []position) {
 		return ps[i].seq < ps[j].seq
 	})
 }
+
+// accumulateForwards is accumulate_forwards_reachable_events: one batch's
+// links, walked forwards from every conflicted event.
+func accumulateForwards(fwdReach map[int64]int64, links map[int64][]link, conflicted []position) {
+	fwd := forwardLinks(links)
+	for _, p := range conflicted {
+		if cur, ok := fwdReach[p.chain]; !ok || p.seq < cur {
+			fwdReach[p.chain] = p.seq
+		}
+		materialize(p.chain, p.seq, fwd, fwdReach, false)
+	}
+}
+
+// batchedForwardReach is v2.1's forwards reachability as Synapse computes it
+// over more than one _get_chain_links batch. Each batch is walked with only
+// its own links, and a chain an earlier batch reached is not walked again
+// from there, so a path needing links from two batches can be missed. Which
+// chains share a batch, and in what order the batches come, is the set
+// order of set(seen_chains): islice(chains_to_fetch, 1000) at a time, and
+// after each batch its chains and every chain its links came from are
+// removed (difference_update leaves the order of the rest alone).
+//
+// insertion is the order chains were added to seen_chains.
+func batchedForwardReach(insertion []int64, links map[int64][]link, conflicted []position) map[int64]int64 {
+	fwdReach := map[int64]int64{}
+	removed := map[int64]bool{}
+	order := pyset.Order(insertion)
+	for next := 0; ; {
+		var batch []int64
+		for ; next < len(order) && len(batch) < chainBatch; next++ {
+			if !removed[order[next]] {
+				batch = append(batch, order[next])
+			}
+		}
+		if len(batch) == 0 {
+			return fwdReach
+		}
+		for _, c := range batch {
+			removed[c] = true
+		}
+		bl := batchLinks(batch, links)
+		for c := range bl {
+			removed[c] = true
+		}
+		accumulateForwards(fwdReach, bl, conflicted)
+	}
+}
+
+// batchLinks is what _get_chain_links's recursive query returns for a batch:
+// every link out of every chain reachable from the batch's chains that
+// have links.
+func batchLinks(batch []int64, links map[int64][]link) map[int64][]link {
+	out := map[int64][]link{}
+	var stack []int64
+	for _, c := range batch {
+		if _, ok := links[c]; ok {
+			if _, done := out[c]; !done {
+				out[c] = links[c]
+				stack = append(stack, c)
+			}
+		}
+	}
+	for len(stack) > 0 {
+		c := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		for _, l := range links[c] {
+			if _, done := out[l.targetChain]; done {
+				continue
+			}
+			if ls, ok := links[l.targetChain]; ok {
+				out[l.targetChain] = ls
+				stack = append(stack, l.targetChain)
+			}
+		}
+	}
+	return out
+}
+
+// forwardOrders is how many insertion orders forwardReachAnyOrder tries.
+const forwardOrders = 4
+
+// forwardReachAnyOrder is batchedForwardReach for the insertion order seen
+// and a few others. Synapse's insertion order follows a set of event IDs,
+// whose string hashes are seeded per process, so it cannot be known; it
+// only matters where chain IDs collide in the set's table. When the orders
+// disagree, Synapse's answer is a coin toss and tie is true; the first
+// order's answer is returned.
+func forwardReachAnyOrder(insertion []int64, links map[int64][]link, conflicted []position) (map[int64]int64, bool) {
+	first := batchedForwardReach(insertion, links, conflicted)
+	rng := rand.New(rand.NewPCG(uint64(len(insertion)), 1))
+	other := slices.Clone(insertion)
+	for range forwardOrders - 1 {
+		rng.Shuffle(len(other), func(i, j int) { other[i], other[j] = other[j], other[i] })
+		if !maps.Equal(first, batchedForwardReach(other, links, conflicted)) {
+			return first, true
+		}
+	}
+	return first, false
+}
+
+var chainCounts struct{ differences, multiBatch, multiBatchV21, ties atomic.Int64 }
+
+// ChainCounts is, since the process started: auth chain differences
+// computed, how many Synapse would have fetched links for in more than one
+// batch, how many of those had v2.1 conflicted events (where the batching
+// changes the answer), and how many of those Synapse would answer
+// differently in another process.
+func ChainCounts() (differences, multiBatch, multiBatchV21, ties int64) {
+	return chainCounts.differences.Load(), chainCounts.multiBatch.Load(), chainCounts.multiBatchV21.Load(), chainCounts.ties.Load()
+}
+
+// chainForwardTies counts v2.1 conflicted subgraphs whose forwards
+// reachability Synapse would compute differently in another process.
+var chainForwardTies = promauto.NewCounter(prometheus.CounterOpts{
+	Name: "goinbound_pdu_chain_forward_ties_total",
+	Help: "v2.1 forwards reachability that depends on Python set order.",
+})
 
 // chainBatches counts how many _get_chain_links batches a difference needed.
 // Above one, Synapse's own answer for v2.1 depends on set iteration order, so

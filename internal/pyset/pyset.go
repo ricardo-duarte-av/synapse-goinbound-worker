@@ -1,16 +1,19 @@
-package pduverify
+// Package pyset reproduces the iteration order of CPython 3.13 sets of
+// ints, where Synapse's answer depends on it.
+package pyset
 
-// pySetOrder is the order CPython 3.13 iterates set(set(ids)), the ids
-// added in the order given: Synapse's state_group_ids_set
-// (state/__init__.py resolve_state_groups_for_events), copied again by
-// _get_state_for_groups_using_cache, whose dict order decides which group
-// _make_state_cache_entry picks on a tie.
+// Order is the order CPython 3.13 iterates set(set(ids)), the ids added in
+// the order given. Synapse iterates such sets in, for example,
+// state_group_ids_set (state/__init__.py resolve_state_groups_for_events,
+// copied again by _get_state_for_groups_using_cache, whose dict order
+// decides which group _make_state_cache_entry picks on a tie) and
+// _get_chain_links' chains_to_fetch (which chains share a link batch).
 //
 // Small ints hash to themselves, so the order is the hash table's slot
 // order, which depends on insertion order only when ids collide. This is
 // Objects/setobject.c: set_add_entry, set_insert_clean, set_table_resize
 // and set_merge. ids must be distinct and positive.
-func pySetOrder(ids []int64) []int64 {
+func Order(ids []int64) []int64 {
 	s := newPySet()
 	for _, id := range ids {
 		s.add(id)

@@ -1,4 +1,4 @@
-package pduverify
+package pyset
 
 import (
 	"encoding/json"
@@ -19,7 +19,7 @@ func TestPySetOrderMatchesCPython(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, c := range cases {
-		if got := pySetOrder(c[0]); !slices.Equal(got, c[1]) {
+		if got := Order(c[0]); !slices.Equal(got, c[1]) {
 			t.Errorf("set(set(%v)) = %v, want %v", c[0], got, c[1])
 		}
 	}
