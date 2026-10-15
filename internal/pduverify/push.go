@@ -40,7 +40,10 @@ var (
 
 // pushRow is one user's event_push_actions row, as Synapse would write it.
 type pushRow struct {
-	actions          any // decoded JSON
+	actions any // decoded JSON
+	// column is the actions column as stored (_serialize_action): what
+	// write mode must write byte for byte.
+	column           string
 	notif, highlight bool
 	unread           bool
 	thread           string
@@ -142,7 +145,7 @@ func (s *Verifier) Push(ctx context.Context, id string, before pdu.StateMap, sna
 		} else if err := json.Unmarshal([]byte(r.Actions), &actions); err != nil {
 			return res.fail(OutcomeError, "stored actions: "+err.Error())
 		}
-		storedRows[r.UserID] = pushRow{actions: actions, notif: r.Notif, highlight: r.Highlight, unread: r.Unread, thread: r.ThreadID}
+		storedRows[r.UserID] = pushRow{actions: actions, column: r.Actions, notif: r.Notif, highlight: r.Highlight, unread: r.Unread, thread: r.ThreadID}
 	}
 
 	if before == nil {
@@ -395,8 +398,9 @@ func (s *Verifier) pushRows(ctx context.Context, ev *pdu.Event, before pdu.State
 		raw, _ := json.Marshal(actions)
 		var decoded any
 		_ = json.Unmarshal(raw, &decoded)
-		out[uid] = pushRow{actions: decoded, notif: push.Notifies(actions), highlight: push.Highlights(actions),
-			unread: countAsUnread, thread: thread}
+		highlight := push.Highlights(actions)
+		out[uid] = pushRow{actions: decoded, column: push.SerializeActions(actions, highlight), notif: push.Notifies(actions),
+			highlight: highlight, unread: countAsUnread, thread: thread}
 	}
 	return out, nil
 }
@@ -742,11 +746,11 @@ func diffPush(ours, stored map[string]pushRow) []string {
 			return "<none>"
 		}
 		b, _ := json.Marshal(r.actions)
-		return fmt.Sprintf("%s notif=%v highlight=%v unread=%v thread=%s", b, r.notif, r.highlight, r.unread, r.thread)
+		return fmt.Sprintf("%s column=%q notif=%v highlight=%v unread=%v thread=%s", b, r.column, r.notif, r.highlight, r.unread, r.thread)
 	}
 	for u, o := range ours {
 		st, ok := stored[u]
-		if !ok || !reflect.DeepEqual(o.actions, st.actions) || o.notif != st.notif ||
+		if !ok || !reflect.DeepEqual(o.actions, st.actions) || o.column != st.column || o.notif != st.notif ||
 			o.highlight != st.highlight || o.unread != st.unread || o.thread != st.thread {
 			out = append(out, fmt.Sprintf("%s: ours=%s stored=%s", u, show(o, true), show(st, ok)))
 		}

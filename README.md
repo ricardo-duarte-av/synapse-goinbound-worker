@@ -327,6 +327,12 @@ Who is in the room is read from current state. So the check is skipped as
 A reader's receipt at or past the event deletes their non-highlight rows.
 That happens in a background loop, so the row may still be there when the
 check runs. Such readers are left out of the comparison on both sides.
+Each row's `actions` column is also compared byte for byte, as write mode
+must write it to `event_push_actions_staging`: `_serialize_action`'s `""` for
+the default lists (by Python equality, so key order and `False == 0` don't
+matter), otherwise the actions after the Rust evaluator's serde round trip,
+encoded compactly with `ensure_ascii`. Every distinct stored column (8
+forms, 38k rows, 2026-10-15) re-serializes to itself.
 `pdusweep -push` runs the same check over recent stored events. On
 2026-10-14, 1,251 events with rows matched exactly, across v1-v12:
 2,574 rows, 1,410 of them notifying. A deliberate mutation (unread always
