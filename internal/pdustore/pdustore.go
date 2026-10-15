@@ -32,6 +32,25 @@ var Tables = []string{
 	"ignored_users", "event_relations", "thread_subscriptions", "room_depth", "event_push_actions", "receipts_linearized",
 	// Write mode's device resync check.
 	"device_lists_remote_cache",
+	// Invite permission config, for push on invites of local users.
+	"account_data",
+}
+
+const qAccountData = `SELECT content FROM account_data WHERE user_id = $1 AND account_data_type = $2`
+
+// AccountData is get_global_account_data_by_type_for_user: the content, or
+// ok false when there is none.
+func (s *Store) AccountData(ctx context.Context, userID, typ string) (content []byte, ok bool, err error) {
+	var c string
+	err = s.pool.QueryRow(ctx, qAccountData, userID, typ).Scan(&c)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("pdustore: account data: %w", err)
+	}
+	// `if result:` -- an empty string is no data.
+	return []byte(c), c != "", nil
 }
 
 const qCachedDevices = `SELECT device_id, content FROM device_lists_remote_cache WHERE user_id = $1`

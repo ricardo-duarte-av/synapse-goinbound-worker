@@ -201,3 +201,7 @@ func globToRegex(glob string) (*regexp.Regexp, error) {
 	sb.WriteString(`\z`)
 	return regexp.Compile(`(?i)` + sb.String())
 }
+
+// GlobMatch is matrix_common's glob_to_regex(pattern).match(name): the whole
+// name, case-insensitively, '?' one character and '*' any run.
+func GlobMatch(pattern, name string) bool { return glob(pattern).match(name) }

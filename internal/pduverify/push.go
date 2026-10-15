@@ -28,6 +28,8 @@ type PushConfig struct {
 	Flags           push.Flags
 	// UnreadCounts is msc2654_enabled: count_as_unread rows.
 	UnreadCounts bool
+	// MSC4155 is msc4155_enabled: MSC4155 invite filtering is read.
+	MSC4155 bool
 }
 
 // EnablePush turns on the push check.
@@ -96,12 +98,6 @@ func (s *Verifier) pushCheck(ctx context.Context, id string, before pdu.StateMap
 		// Rows a day old are deleted once summarised
 		// (_remove_old_push_actions_that_have_rotated).
 		return res.fail(OutcomeSkipped, "pruned")
-	}
-	if localInvite(ev, s.push.ServerName) {
-		// A local invitee's invite config (MSC4155/MSC4380) is not
-		// reproduced. A remote one has no account data, so
-		// get_invite_config_for_user allows every invite.
-		return res.fail(OutcomeSkipped, "invite")
 	}
 
 	// _run_push_actions_and_persist_event skips an event older than the
@@ -292,6 +288,22 @@ func (s *Verifier) pushRows(ctx context.Context, ev *pdu.Event, before pdu.State
 		kept = append(kept, u)
 	}
 	users = kept
+	// An invite runs the invitee's rules too, unless their invite config
+	// refuses the inviter, in which case nobody is notified.
+	if isMember {
+		if m, err := ev.Membership(); err == nil && m == "invite" {
+			ok, err := s.inviteAllowed(ctx, *ev.StateKey, ev.Sender)
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				return map[string]pushRow{}, nil
+			}
+			if invitee := *ev.StateKey; domain(invitee) == cfg.ServerName && indexOf(users, invitee) < 0 {
+				users = append(users, invitee)
+			}
+		}
+	}
 	if len(users) == 0 {
 		return map[string]pushRow{}, nil
 	}
@@ -846,6 +858,7 @@ func PushConfigFor(hs *synapsecfg.Config) (PushConfig, error) {
 		ServerName:      hs.ServerName,
 		AppServiceUsers: as,
 		UnreadCounts:    hs.Flag("msc2654_enabled", false),
+		MSC4155:         hs.Flag("msc4155_enabled", false),
 		Flags: push.Flags{
 			MSC1767:              hs.Flag("msc1767_enabled", false),
 			MSC3381Polls:         hs.Flag("msc3381_polls_enabled", false),
@@ -857,13 +870,4 @@ func PushConfigFor(hs *synapsecfg.Config) (PushConfig, error) {
 			MSC4306: hs.Flag("msc4306_enabled", false),
 		},
 	}, nil
-}
-
-// localInvite says the event invites one of our users.
-func localInvite(ev *pdu.Event, server string) bool {
-	if ev.Type != "m.room.member" || ev.StateKey == nil {
-		return false
-	}
-	m, err := ev.Membership()
-	return err == nil && m == "invite" && domain(*ev.StateKey) == server
 }

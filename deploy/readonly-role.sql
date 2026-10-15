@@ -27,6 +27,7 @@ GRANT USAGE ON SCHEMA public TO goinbound_ro;
 -- Exactly the tables internal/store (EDU path) and internal/pdustore (PDU
 -- checker) read.
 GRANT SELECT ON
+    account_data,
     current_state_events,
     destinations,
     device_lists_remote_cache,

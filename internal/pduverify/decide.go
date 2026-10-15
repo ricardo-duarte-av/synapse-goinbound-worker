@@ -575,11 +575,6 @@ func (s *Verifier) decidePush(ctx context.Context, ev *pdu.Event, d *Decision, s
 		d.pushSkipped = true
 		return nil, "", nil
 	}
-	if localInvite(ev, s.push.ServerName) {
-		// A local invitee's invite config (MSC4155/MSC4380) is not
-		// reproduced.
-		return nil, "push for an invite", nil
-	}
 	if d.SoftFailed {
 		// filter_event_for_clients_with_state shows it to nobody.
 		d.pushRows = map[string]pushRow{}
