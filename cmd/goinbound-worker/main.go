@@ -313,9 +313,13 @@ func buildHandler(ctx context.Context, cfg *config.Config, up *proxy.Proxy, log 
 				db.Close()
 				return nil, noop, err
 			}
-			proc.EnableMissingEvents(&inbound.MissingDeps{
-				Fetch: fedfetch.New(fc, pst, pv, asker, hs.ServerName, keys), Store: pst, Verifier: pv,
-			})
+			fetcher := fedfetch.New(fc, pst, pv, asker, hs.ServerName, keys)
+			fetcher.OnFailure = func(ctx context.Context, roomID, eventID, cause string) {
+				if err := wdb.RecordFailedPull(ctx, roomID, eventID, cause); err != nil {
+					log.Warn().Err(err).Str("event_id", eventID).Msg("Could not record a failed pull attempt")
+				}
+			}
+			proc.EnableMissingEvents(&inbound.MissingDeps{Fetch: fetcher, Store: pst, Verifier: pv})
 			log.Info().Msg("Write mode fetches missing prev events from the origin")
 		}
 		fd := inbound.NewFrontDoor(inbound.FrontDoorDeps{

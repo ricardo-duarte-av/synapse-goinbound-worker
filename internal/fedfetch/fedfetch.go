@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"maunium.net/go/mautrix/federation"
@@ -48,7 +49,19 @@ type Client struct {
 	policy pduverify.PolicyAsker
 	server string
 	keys   *keyring.Keyring
+	// OnFailure records a failed pull attempt (record_failure_callback):
+	// a pulled event whose signature or content hash failed.
+	OnFailure func(ctx context.Context, roomID, eventID, cause string)
 }
+
+// How check treats a bad signature: in a batch, look for a good copy
+// (_check_sigs_and_hash_and_fetch_one); for one event, fail (get_pdu).
+type checkMode int
+
+const (
+	batch checkMode = iota
+	single
+)
 
 // New builds a client over a signed federation client. keys, when not nil,
 // finds signing keys Synapse does not hold yet.
@@ -83,7 +96,7 @@ func (c *Client) MissingEvents(ctx context.Context, origin, roomID string, rv *p
 	}
 	out := make([]*Pulled, 0, len(resp.Events))
 	for _, raw := range resp.Events {
-		p, err := c.check(ctx, raw, rv, roomID)
+		p, err := c.check(ctx, raw, rv, roomID, origin, batch)
 		if err != nil {
 			return nil, err
 		}
@@ -129,7 +142,7 @@ func (c *Client) Event(ctx context.Context, dest, eventID, roomID string, rv *pd
 	if len(resp.PDUs) == 0 {
 		return nil, nil
 	}
-	p, err := c.check(ctx, resp.PDUs[0], rv, roomID)
+	p, err := c.check(ctx, resp.PDUs[0], rv, roomID, dest, single)
 	if err != nil || p == nil {
 		return nil, err
 	}
@@ -155,7 +168,7 @@ func (c *Client) State(ctx context.Context, dest, roomID, eventID string, rv *pd
 		out  *[]*Pulled
 	}{{resp.AuthChain, &auth}, {resp.PDUs, &state}} {
 		for _, raw := range list.raws {
-			p, err := c.check(ctx, raw, rv, roomID)
+			p, err := c.check(ctx, raw, rv, roomID, dest, batch)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -170,7 +183,7 @@ func (c *Client) State(ctx context.Context, dest, roomID, eventID string, rv *pd
 // check is event_from_pdu_json, then _check_sigs_and_hash_and_fetch_one for
 // the outcomes we reproduce: valid signatures and hash, and the policy
 // server's verdict. A PDU event_from_pdu_json rejects is dropped (nil).
-func (c *Client) check(ctx context.Context, raw []byte, rv *pdu.RoomVersion, roomID string) (*Pulled, error) {
+func (c *Client) check(ctx context.Context, raw []byte, rv *pdu.RoomVersion, roomID, origin string, mode checkMode) (*Pulled, error) {
 	if err := pdu.CheckPDUJSON(raw, rv); errors.Is(err, pdu.ErrIgnoredPDU) {
 		return nil, nil
 	} else if err != nil {
@@ -193,9 +206,9 @@ func (c *Client) check(ctx context.Context, raw []byte, rv *pdu.RoomVersion, roo
 	if err != nil || id == "" {
 		return nil, fmt.Errorf("%w: unparseable pulled event", ErrUncertain)
 	}
-	if ok, err := pdu.CheckContentHash(raw); err != nil || !ok {
-		// Synapse redacts it.
-		return nil, fmt.Errorf("%w: pulled event %s fails its content hash", ErrUncertain, id)
+	hashOK, err := pdu.CheckContentHash(raw)
+	if err != nil {
+		return nil, fmt.Errorf("%w: pulled event %s: content hash: %v", ErrUncertain, id, err)
 	}
 	lookup := func(server string, keyIDs []string, _ int64) (map[string]pdu.VerifyKey, error) {
 		return c.st.VerifyKeys(ctx, server, keyIDs)
@@ -204,11 +217,23 @@ func (c *Client) check(ctx context.Context, raw []byte, rv *pdu.RoomVersion, roo
 		lookup = c.keys.Fetch(ctx)
 	}
 	if err := pdu.CheckSignaturesWith(ev, raw, lookup); err != nil {
-		// A key Synapse would fetch, or a signature it would look for a
-		// good copy of.
-		return nil, fmt.Errorf("%w: pulled event %s: %v", ErrUncertain, id, err)
+		return c.badSignature(ctx, err, ev, id, rv, roomID, origin, mode)
 	}
 	p := &Pulled{ID: id, Event: ev, Metadata: map[string]any{}}
+	if !hashOK {
+		// "Event content has been tampered, redacting": recorded, the
+		// pruned copy kept, no policy server asked.
+		c.failed(ctx, ev.RoomID, id, "Event content has been tampered with")
+		pulled, err := pduverify.PulledEvent(raw, "", nil)
+		if err == nil {
+			p.Raw, err = pdu.Redact(pulled, rv)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrUncertain, err)
+		}
+		p.Metadata["redacted"] = true
+		return p, nil
+	}
 	v, err := c.v.Policy(ctx, raw, ev, c.server)
 	if err != nil {
 		return nil, err
@@ -232,6 +257,62 @@ func (c *Client) check(ctx context.Context, raw []byte, rv *pdu.RoomVersion, roo
 	// No request time: any age is dropped.
 	if p.Raw, err = pduverify.PulledEvent(raw, v.Server, sigs); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrUncertain, err)
+	}
+	return p, nil
+}
+
+func (c *Client) failed(ctx context.Context, roomID, eventID, cause string) {
+	if c.OnFailure != nil {
+		c.OnFailure(ctx, roomID, eventID, cause)
+	}
+}
+
+// badSignature is _check_sigs_and_hash raising InvalidEventSignatureError:
+// recorded as a failed pull, then for one event (get_pdu) an error, and in a
+// batch a look for a good copy, ours or the sender's server's.
+func (c *Client) badSignature(ctx context.Context, err error, ev *pdu.Event, id string, rv *pdu.RoomVersion, roomID, origin string, mode checkMode) (*Pulled, error) {
+	var se *pdu.SignatureError
+	if !errors.As(err, &se) {
+		// A key Synapse would fetch and we could not find.
+		return nil, fmt.Errorf("%w: pulled event %s: %v", ErrUncertain, id, err)
+	}
+	text, ok := se.SynapseText()
+	if !ok {
+		return nil, fmt.Errorf("%w: pulled event %s: %v", ErrUncertain, id, err)
+	}
+	c.failed(ctx, ev.RoomID, id, text)
+	if mode == single {
+		return nil, fmt.Errorf("event id %s: %s", id, text)
+	}
+	held, _, err := c.st.GetStoredEvents(ctx, []string{id})
+	if err != nil {
+		return nil, err
+	}
+	if se := held[id]; se != nil {
+		if se.Outlier {
+			// Synapse would go on with its stored outlier copy, which
+			// _process_pulled_event then refuses; not reproduced.
+			return nil, fmt.Errorf("%w: pulled event %s held as an outlier with a bad signature", ErrUncertain, id)
+		}
+		// Held in the timeline: _process_pulled_events skips it.
+		return nil, nil
+	}
+	sender := ev.Sender
+	if i := strings.IndexByte(sender, ':'); i >= 0 {
+		sender = sender[i+1:]
+	}
+	if sender == origin {
+		// "Failed to find copy of ... with valid signature": dropped.
+		return nil, nil
+	}
+	fctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	p, err := c.Event(fctx, sender, id, roomID, rv)
+	if errors.Is(err, ErrUncertain) {
+		return nil, err
+	}
+	if err != nil {
+		return nil, nil
 	}
 	return p, nil
 }

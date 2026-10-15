@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"sync"
 	"time"
 
@@ -279,27 +278,11 @@ func errorJSON(msg string) json.RawMessage {
 }
 
 // signatureErrorEntry is the /send entry for a PDU whose signature check
-// fails: {"error": str(FederationError("ERROR", 403, str(e)))}, e being
-// _check_sigs_on_pdu's InvalidEventSignatureError around the Keyring's
-// SynapseError around signedjson's SignatureVerifyException. ok is false
-// for a failure whose words we do not reproduce.
+// fails: {"error": str(FederationError("ERROR", 403, str(e)))}.
 func signatureErrorEntry(se *pdu.SignatureError) (json.RawMessage, bool) {
-	var inner string
-	switch se.Kind {
-	case pdu.SigNotSigned:
-		inner = "400: Not signed by " + se.Server
-	case pdu.SigForged:
-		inner = fmt.Sprintf("401: Invalid signature for server %s with key %s: Unable to verify signature for %s: "+
-			"<class 'nacl.exceptions.BadSignatureError'> Signature was forged or corrupt", se.Server, se.KeyID, se.Server)
-	case pdu.SigBadLength:
-		inner = fmt.Sprintf("401: Invalid signature for server %s with key %s: Unable to verify signature for %s: "+
-			"<class 'nacl.exceptions.ValueError'> The signature must be exactly 64 bytes long", se.Server, se.KeyID, se.Server)
-	default:
+	text, ok := se.SynapseText()
+	if !ok {
 		return nil, false
 	}
-	if se.Role == "" {
-		return nil, false
-	}
-	msg := fmt.Sprintf("ERROR 403: unable to verify signature for %s %s: %s", se.Role, se.Server, inner)
-	return errorJSON(msg), true
+	return errorJSON("ERROR 403: " + text), true
 }

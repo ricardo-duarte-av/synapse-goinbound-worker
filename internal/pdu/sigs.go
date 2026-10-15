@@ -564,3 +564,27 @@ func VerifyWithKey(raw []byte, rv *RoomVersion, server, keyID string, key ed2551
 
 // DecodeBase64 is unpaddedbase64.decode_base64.
 func DecodeBase64(s string) ([]byte, error) { return decodeUnpaddedBase64(s) }
+
+// SynapseText is str(InvalidEventSignatureError) for this failure, as
+// _check_sigs_on_pdu words it around the Keyring's SynapseError and
+// signedjson's message around PyNaCl's (each checked in the Synapse 1.162
+// image). ok is false for a failure whose words we do not reproduce.
+func (e *SignatureError) SynapseText() (string, bool) {
+	var inner string
+	switch e.Kind {
+	case SigNotSigned:
+		inner = "400: Not signed by " + e.Server
+	case SigForged:
+		inner = fmt.Sprintf("401: Invalid signature for server %s with key %s: Unable to verify signature for %s: "+
+			"<class 'nacl.exceptions.BadSignatureError'> Signature was forged or corrupt", e.Server, e.KeyID, e.Server)
+	case SigBadLength:
+		inner = fmt.Sprintf("401: Invalid signature for server %s with key %s: Unable to verify signature for %s: "+
+			"<class 'nacl.exceptions.ValueError'> The signature must be exactly 64 bytes long", e.Server, e.KeyID, e.Server)
+	default:
+		return "", false
+	}
+	if e.Role == "" {
+		return "", false
+	}
+	return fmt.Sprintf("unable to verify signature for %s %s: %s", e.Role, e.Server, inner), true
+}
