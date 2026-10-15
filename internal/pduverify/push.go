@@ -97,11 +97,11 @@ func (s *Verifier) pushCheck(ctx context.Context, id string, before pdu.StateMap
 		// (_remove_old_push_actions_that_have_rotated).
 		return res.fail(OutcomeSkipped, "pruned")
 	}
-	if ev.Type == "m.room.member" {
-		if m, err := ev.Membership(); err == nil && m == "invite" {
-			// Invite filtering (MSC4155/MSC4380) is not reproduced.
-			return res.fail(OutcomeSkipped, "invite")
-		}
+	if localInvite(ev, s.push.ServerName) {
+		// A local invitee's invite config (MSC4155/MSC4380) is not
+		// reproduced. A remote one has no account data, so
+		// get_invite_config_for_user allows every invite.
+		return res.fail(OutcomeSkipped, "invite")
 	}
 
 	// _run_push_actions_and_persist_event skips an event older than the
@@ -857,4 +857,13 @@ func PushConfigFor(hs *synapsecfg.Config) (PushConfig, error) {
 			MSC4306: hs.Flag("msc4306_enabled", false),
 		},
 	}, nil
+}
+
+// localInvite says the event invites one of our users.
+func localInvite(ev *pdu.Event, server string) bool {
+	if ev.Type != "m.room.member" || ev.StateKey == nil {
+		return false
+	}
+	m, err := ev.Membership()
+	return err == nil && m == "invite" && domain(*ev.StateKey) == server
 }
