@@ -20,12 +20,14 @@ import (
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/acl"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/fedclient"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/fedfetch"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pdu"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pdustore"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pduverify"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/stateres"
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/store"
 )
 
 // An end-to-end run of write mode over a small real room on the throwaway
@@ -142,7 +144,15 @@ func TestWriteModeFetchesMissingPrevs(t *testing.T) {
 	// The pulled prev's own prev is missing: its state comes from the
 	// origin's /state_ids and /state, the prev from /event as an outlier.
 	t.Run("gap behind the prev", func(t *testing.T) { runMissingPrevs(t, true, true) })
+	// Through the front door, beside a PDU with a forged signature.
+	t.Run("front door", func(t *testing.T) {
+		frontDoor = true
+		defer func() { frontDoor = false }()
+		runMissingPrevs(t, true, false)
+	})
 }
+
+var frontDoor bool
 
 func runMissingPrevs(t *testing.T, originHasIt, gap bool) {
 	ctx := context.Background()
@@ -277,12 +287,41 @@ func runMissingPrevs(t *testing.T, originHasIt, gap bool) {
 	p.EnableMissingEvents(&MissingDeps{Fetch: fedfetch.New(fc, pst, v, nil, "local.test", nil), Store: pst, Verifier: v})
 	defer p.Close()
 
-	staged, err := pduverify.StagedEvent(m3, time.Now(), "", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := p.Received(ctx, "remote.test", room, m3ID, staged, []byte(`{}`)); err != nil {
-		t.Fatal(err)
+	if frontDoor {
+		forgedID, forged := ev(remote, "m.room.message", bob, nil, map[string]any{"msgtype": "m.text", "body": "forged"}, 7, []string{m1ID}, []string{createID, plID, bJoinID})
+		forged, _ = sjson.SetBytes(forged, "signatures.remote\\.test.ed25519:r", base64.RawStdEncoding.EncodeToString(make([]byte, 64)))
+		if forgedID, err = pdu.CalculateEventID(forged, rv); err != nil {
+			t.Fatal(err)
+		}
+		edb, err := store.Open(ctx, store.Config{DSN: os.Getenv("INBOUND_TEST_ADMIN_DSN"), MaxConns: 2, QueryTimeout: 5 * time.Second})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer edb.Close()
+		fd := NewFrontDoor(FrontDoorDeps{Store: pst, Verifier: v, ACL: acl.NewChecker(edb, 0), Processor: p, Server: "local.test"})
+		plan, why := fd.PlanPDUs(ctx, "remote.test", []json.RawMessage{m3, forged}, time.Now())
+		if why != "" {
+			t.Fatalf("left to Synapse: %s", why)
+		}
+		res := plan.Run(ctx)
+		if string(res[m3ID]) != `{}` {
+			t.Errorf("M3's entry %s", res[m3ID])
+		}
+		want := `{"error":"ERROR 403: unable to verify signature for sender domain remote.test: 401: Invalid signature for server remote.test with key ed25519:r: Unable to verify signature for remote.test: <class 'nacl.exceptions.BadSignatureError'> Signature was forged or corrupt"}`
+		if string(res[forgedID]) != want {
+			t.Errorf("forged entry %s", res[forgedID])
+		}
+		if staged, _ := pst.Staged(ctx, forgedID); staged {
+			t.Error("the forged PDU was staged")
+		}
+	} else {
+		staged, err := pduverify.StagedEvent(m3, time.Now(), "", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := p.Received(ctx, "remote.test", room, m3ID, staged, []byte(`{}`)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if !originHasIt {
 		waitFor(t, "M3 dropped", func() bool { s, _ := d.NextStaged(ctx, room); return s == nil })
