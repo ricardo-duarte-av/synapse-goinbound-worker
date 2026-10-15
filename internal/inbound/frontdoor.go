@@ -41,6 +41,9 @@ type FrontDoorDeps struct {
 	// Keys, when set, finds keys Synapse does not hold yet, as its Keyring
 	// would; without it such a transaction is Synapse's.
 	Keys *keyring.Keyring
+	// TestDrop, when set, drops some of one origin's PDUs on purpose
+	// (write.test_drop_pdus).
+	TestDrop *TestDrop
 }
 
 // FrontDoor plans and runs transactions' PDUs.
@@ -234,6 +237,9 @@ func (p *Plan) stage(ctx context.Context, pp *plannedPDU) json.RawMessage {
 	f := p.f
 	if pp.failed != nil {
 		return pp.failed
+	}
+	if f.d.TestDrop.take(p.origin, pp.room, pp.id) {
+		return json.RawMessage(`{}`)
 	}
 	if pp.redacted {
 		staged, err := pduverify.RedactedStagedEvent(pp.raw, pp.rv, p.at)

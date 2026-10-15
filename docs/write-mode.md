@@ -83,6 +83,16 @@ Everything else goes through Synapse's replication endpoints:
 | 12 | Verification in reverse: after Go writes, re-derive and compare | todo |
 | 13 | A/B replay on two copies of a snapshot | todo |
 
+## Testing the fetch path
+
+The fetch path can't be compared with Synapse live: by the time we see an
+event, Synapse has fetched its prevs already, or it hasn't. So it is tested
+against a server we control. `write.test_drop_pdus` answers the next few PDUs
+from a write origin, in one room, without staging them. The next event then
+arrives with missing prev events, and write mode fetches them as Synapse would:
+`/get_missing_events` for up to 10, `/state_ids` beyond that. Every dropped
+event must end up persisted exactly once, with nothing left staged.
+
 ## Known gaps
 
 - Partial state rooms are deferred: one here (`!cURbafjkfsMDVwdRDQ:matrix.org`), with

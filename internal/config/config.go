@@ -10,6 +10,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -395,6 +396,16 @@ func (c *Config) validate() error {
 	if m := c.Write.MissingEvents; m != "" && m != "defer" && m != "fetch" {
 		return fmt.Errorf("write.missing_events is %q; it must be defer or fetch", m)
 	}
+	if d := c.Write.TestDropPDUs; d != nil {
+		switch {
+		case !slices.Contains(c.Write.Origins, d.Origin):
+			return fmt.Errorf("write.test_drop_pdus: origin %q is not in write.origins; only a server we control may be given a gap", d.Origin)
+		case d.Room == "" || d.Count <= 0:
+			return fmt.Errorf("write.test_drop_pdus needs a room and a count above 0")
+		case !c.Write.FetchesMissingEvents():
+			return fmt.Errorf("write.test_drop_pdus tests fetching; it needs write.missing_events: fetch")
+		}
+	}
 	if c.Write.MarkOriginsUp && !c.Modes.PDU.ServesNatively() {
 		return fmt.Errorf("write.mark_origins_up writes destinations and the caches stream, as write mode's role; " +
 			"it needs modes.pdu canary:N or native")
@@ -428,6 +439,17 @@ type Write struct {
 	// the destinations reset, its invalidation on the caches stream under
 	// instance_name, and REMOTE_SERVER_UP. False proxies them.
 	MarkOriginsUp bool `yaml:"mark_origins_up"`
+	// TestDropPDUs makes a gap on purpose, to test missing_events: fetch
+	// against a server we control. Synapse has nothing like it.
+	TestDropPDUs *TestDrop `yaml:"test_drop_pdus"`
+}
+
+// TestDrop answers the next Count PDUs from Origin in Room without staging
+// them, once per start.
+type TestDrop struct {
+	Origin string `yaml:"origin"`
+	Room   string `yaml:"room"`
+	Count  int    `yaml:"count"`
 }
 
 // FetchesMissingEvents says write.missing_events is fetch.

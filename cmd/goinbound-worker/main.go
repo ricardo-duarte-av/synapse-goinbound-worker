@@ -323,9 +323,15 @@ func buildHandler(ctx context.Context, cfg *config.Config, up *proxy.Proxy, log 
 			proc.EnableMissingEvents(&inbound.MissingDeps{Fetch: fetcher, Store: pst, Verifier: pv})
 			log.Info().Msg("Write mode fetches missing prev events from the origin")
 		}
-		fd := inbound.NewFrontDoor(inbound.FrontDoorDeps{
+		deps := inbound.FrontDoorDeps{
 			Store: pst, Verifier: pv, ACL: acls, Policy: asker, Processor: proc, Server: hs.ServerName, Keys: keys,
-		})
+		}
+		if d := cfg.Write.TestDropPDUs; d != nil {
+			deps.TestDrop = inbound.NewTestDrop(d.Origin, d.Room, d.Count, log)
+			log.Warn().Str("origin", d.Origin).Str("room_id", d.Room).Int("count", d.Count).
+				Msg("write.test_drop_pdus: the next PDUs from this origin in this room will be dropped, to make a gap")
+		}
+		fd := inbound.NewFrontDoor(deps)
 		opts.PDUMode, opts.PDUServer, opts.Responses = cfg.Modes.PDU, frontDoor{fd}, wdb
 		opts.WriteOrigins = cfg.Write.Origins
 		proc.Start()

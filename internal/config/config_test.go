@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -169,5 +170,25 @@ func TestWriteOrigins(t *testing.T) {
 	}
 	if _, err := parse([]byte(base + w + "modes:\n  edu: canary:5\n  pdu: shadow\n")); err == nil {
 		t.Error("write origins accepted without write mode")
+	}
+}
+
+// A gap may be made only for a write origin, and only to test fetching.
+func TestTestDropPDUs(t *testing.T) {
+	modes := "modes:\n  edu: canary:5\n  pdu: canary:0\n"
+	w := "write:\n  instance_name: goinbound-worker\n  origins: [daedric.net]\n"
+	drop := "  test_drop_pdus: {origin: %s, room: \"!r:x\", count: %d}\n"
+	cfg, err := parse([]byte(base + w + "  missing_events: fetch\n" + fmt.Sprintf(drop, "daedric.net", 3) + modes))
+	if err != nil || cfg.Write.TestDropPDUs == nil || cfg.Write.TestDropPDUs.Count != 3 {
+		t.Fatalf("%+v %v", cfg, err)
+	}
+	for name, y := range map[string]string{
+		"not a write origin": w + "  missing_events: fetch\n" + fmt.Sprintf(drop, "matrix.org", 3),
+		"no fetching":        w + fmt.Sprintf(drop, "daedric.net", 3),
+		"no count":           w + "  missing_events: fetch\n" + fmt.Sprintf(drop, "daedric.net", 0),
+	} {
+		if _, err := parse([]byte(base + y + modes)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
 	}
 }

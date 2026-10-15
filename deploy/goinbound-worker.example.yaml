@@ -50,6 +50,10 @@ modes:
 #   # as Synapse's worker does (on homeserver.yaml's redis). False proxies
 #   # those transactions.
 #   mark_origins_up: true
+#   # Testing only: answer the next `count` PDUs from a write origin in one
+#   # room without staging them, once per start, so the next event's prev
+#   # events are missing and get fetched. Needs missing_events: fetch.
+#   # test_drop_pdus: {origin: daedric.net, room: "!room:server", count: 3}
 
 # nginx connects here.
 listen:
