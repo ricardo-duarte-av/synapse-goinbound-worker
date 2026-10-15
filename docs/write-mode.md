@@ -70,12 +70,12 @@ Everything else goes through Synapse's replication endpoints:
 | 2b | Decide: write mode's decision for a staged event, through the state cache, checked live against Synapse (`decide` check) | **in shadow**; defers missing prevs, de-outliering, invites' push, v1 state res, partial state, content-hash failures |
 | 3 | Write role with exactly the tables above | **done** (`dbrole` writes, `inbound.Grants`); not yet created at startup |
 | 4 | Staging, room lock, purge read lock, interoperable with Python | **done** (`internal/inbound`: Synapse's SQL, tested on a throwaway PostgreSQL) |
-| 5 | Room queue processor and the one-minute sweep | todo |
+| 5 | Room queue processor and the one-minute sweep | **done** (`inbound.Processor`); a deferred event stays staged, with its room, for Synapse's sweep |
 | 6 | `/send` answer per PDU, and `received_transactions` | todo |
-| 7 | The writes: state groups, push staging, `fed_send_events`, unstage | todo |
+| 7 | The writes: state groups, push staging, `fed_send_events`, unstage | **done**; a failed persist is left staged for Synapse, where Synapse would log it and drop the event |
 | 8 | Missing prevs and state: `/get_missing_events`, `/state_ids`, `/event`, outliers, failed pull attempts | todo |
 | 9 | Side effects: device resync, guest kicks (`allow_guest_access: false` here, so kicks should find no guests) | todo |
-| 10 | Rejected events' context | todo |
+| 10 | Rejected events' context | **done** (same groups, `rejected` set; mapped to the group before) |
 | 11 | State resolution v1: v1 rooms carry 1.4% of events (2,740 of the last 200k, 2026-10-15) | todo |
 | 12 | Verification in reverse: after Go writes, re-derive and compare | todo |
 | 13 | A/B replay on two copies of a snapshot | todo |

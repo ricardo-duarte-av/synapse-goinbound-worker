@@ -692,3 +692,9 @@ func (s *Verifier) CheckDecision(ctx context.Context, id string, d *Decision, sn
 	res.Outcome = OutcomeMatch
 	return res
 }
+
+// NewEntry is a state entry: reuse group, or build on prev with delta, or
+// store state in full. For tests of write mode.
+func NewEntry(group, prev int64, delta, state pdu.StateMap) *StateEntry {
+	return &StateEntry{group: group, prevGroup: prev, delta: delta, state: state}
+}
