@@ -66,7 +66,7 @@ func TestLiveOnStoredEvents(t *testing.T) {
 	}, zerolog.Nop())
 	defer live.Close()
 
-	live.Prepare(body).Commit()
+	live.Prepare("", body).Commit()
 	// Four checks (signatures, state_auth, soft_fail, push) per persisted PDU.
 	deadline := time.After(2 * time.Minute)
 	for n := 0; n < 4*len(pdus); n++ {

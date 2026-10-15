@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"maunium.net/go/mautrix/federation"
 
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/config"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/edu"
@@ -48,7 +49,7 @@ type TxnStore interface {
 // PDUSink is the PDU shadow. Prepare is called before the transaction is
 // proxied and must not block; the result is committed if Synapse answers 200.
 type PDUSink interface {
-	Prepare(txnBody []byte) PDUPending
+	Prepare(origin string, txnBody []byte) PDUPending
 }
 
 // PDUPending is a transaction's PDUs, prepared.
@@ -364,7 +365,10 @@ func (h *Handler) proxyBody(w http.ResponseWriter, r *http.Request, body []byte,
 	if h.pdus != nil && hasPDUs(body) {
 		// Before Synapse sees it: the shadow snapshots each PDU's room as
 		// Synapse is about to find it.
-		pending = h.pdus.Prepare(body)
+		// The claimed origin: the shadow only checks transactions Synapse
+		// accepted, so authenticated ones.
+		origin := federation.ParseXMatrixAuth(r.Header.Get("Authorization")).Origin
+		pending = h.pdus.Prepare(origin, body)
 	}
 	res := h.upstream.Forward(w, withBody(r, body), 0)
 	h.recordProxy(res, reason, rec)

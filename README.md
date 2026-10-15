@@ -252,7 +252,10 @@ event of the room was persisted between the snapshot and this one, the
 current state may have moved, and the case is counted as `race` rather than
 compared.
 
-A PDU for a room no local user is joined to is not waited for: Synapse
+A PDU from an origin the room's server ACL denies is not waited for
+either: Synapse ignores all of that room's PDUs in the transaction
+(`federation_server.py:514`), so this is agreement ("origin denied by server
+ACL"). A PDU for a room no local user is joined to is not waited for: Synapse
 drops it ("not in room", `federation_event.py:296`), and so do we. Someone
 else's leave for a local user is the exception Synapse may persist as an
 outlier; it is skipped. A PDU that is still not persisted when the wait ends

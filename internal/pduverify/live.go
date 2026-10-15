@@ -12,6 +12,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/tidwall/gjson"
 
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/acl"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pdu"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pdustore"
 )
@@ -27,6 +28,7 @@ type Live struct {
 	maxWait  time.Duration
 	prevWait time.Duration
 	server   string
+	acl      ACL
 	onRes    func(string, *Result)
 	wg       sync.WaitGroup
 	ctx      context.Context
@@ -35,6 +37,7 @@ type Live struct {
 
 type job struct {
 	raw      []byte
+	origin   string // the transaction's, as its X-Matrix header names it
 	received time.Time
 
 	// Set by prepare, before snapDone closes.
@@ -64,8 +67,17 @@ type LiveOptions struct {
 	// ServerName is ours. When set, a PDU for a room it is not joined to
 	// is ignored, as Synapse does, rather than waited for.
 	ServerName string
+	// ACL, when set, is checked against the transaction's origin, as
+	// Synapse does before handling a room's PDUs.
+	ACL ACL
 	// OnResult, when set, is called with every check's result. For tests.
 	OnResult func(check string, r *Result)
+}
+
+// ACL answers Synapse's check_server_matches_acl for a room's current
+// state, for a server name without its port.
+type ACL interface {
+	Allowed(ctx context.Context, serverHost, roomID string) (bool, error)
 }
 
 // NewLive starts the shadow's workers.
@@ -83,7 +95,7 @@ func NewLive(v *Verifier, st *pdustore.Store, o LiveOptions, log zerolog.Logger)
 		o.PrevWait = time.Minute
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	l := &Live{v: v, st: st, log: log, queue: make(chan *job, o.Queue), maxWait: o.MaxWait, prevWait: o.PrevWait, server: o.ServerName, onRes: o.OnResult, ctx: ctx, cancel: cancel}
+	l := &Live{v: v, st: st, log: log, queue: make(chan *job, o.Queue), maxWait: o.MaxWait, prevWait: o.PrevWait, server: o.ServerName, acl: o.ACL, onRes: o.OnResult, ctx: ctx, cancel: cancel}
 	for i := 0; i < o.Concurrency; i++ {
 		l.wg.Add(1)
 		go l.work()
@@ -104,11 +116,11 @@ type Pending struct {
 	jobs []*job
 }
 
-// Prepare identifies each PDU of a transaction and starts a snapshot of its
+// Prepare identifies each PDU of a transaction from origin and starts a snapshot of its
 // room, before the transaction is handed to Synapse: the soft-fail check needs
 // the room as Synapse found it, and Synapse starts processing as soon as it
 // has the transaction. Commit once Synapse has accepted it, or Discard.
-func (l *Live) Prepare(txnBody []byte) *Pending {
+func (l *Live) Prepare(origin string, txnBody []byte) *Pending {
 	p := &Pending{l: l}
 	pdus := gjson.GetBytes(txnBody, "pdus")
 	if !pdus.IsArray() {
@@ -120,7 +132,7 @@ func (l *Live) Prepare(txnBody []byte) *Pending {
 			liveDropped.Inc()
 			return true
 		}
-		j := &job{raw: []byte(raw.Raw), received: now, snapDone: make(chan struct{})}
+		j := &job{raw: []byte(raw.Raw), origin: origin, received: now, snapDone: make(chan struct{})}
 		p.jobs = append(p.jobs, j)
 		go l.prepare(j)
 		return true
@@ -182,6 +194,24 @@ func (l *Live) prepare(j *job) {
 	if j.eventID == "" {
 		j.skip = "no event id"
 		return
+	}
+
+	if l.acl != nil {
+		// Synapse checks the origin against the room's ACL before any of
+		// the room's PDUs (federation_server.py:514), and ignores them all
+		// if it is denied.
+		allowed, err := l.acl.Allowed(ctx, acl.ServerHost(j.origin), j.roomID)
+		switch {
+		case errors.Is(err, acl.ErrUncertain):
+			j.skip = "server ACL redacted"
+			return
+		case err != nil:
+			j.fail = "server ACL lookup"
+			return
+		case !allowed:
+			j.agree = "origin denied by server ACL"
+			return
+		}
 	}
 
 	ev, err := pdu.ParseEvent(j.raw, j.eventID, rv, false)
@@ -455,6 +485,7 @@ func reasonLabel(outcome, reason string) string {
 		"room version lookup", "waiting for persistence", "malformed, not persisted", "too large, not persisted", "not persisted, key unknown",
 		"not persisted", "bad signature, not persisted", "signatures", "still queued by Synapse",
 		"not in room", "not in room, invite rescission", "host joined lookup",
+		"origin denied by server ACL", "server ACL redacted", "server ACL lookup",
 		"state_auth did not match", "no replay", "tie", "resolution cached by Synapse", "group after stored in full",
 		"stored in full: prevs may have been missing", "group before", "group after",
 		"outlier", "create event", "prev event without state group", "a prev's state was computed after the event's",

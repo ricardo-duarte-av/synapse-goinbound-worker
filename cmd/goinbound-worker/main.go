@@ -202,7 +202,8 @@ func buildHandler(ctx context.Context, cfg *config.Config, up *proxy.Proxy, log 
 	if cfg.Modes.EDU.ServesNatively() {
 		sender = repl
 	}
-	processor := edu.NewProcessor(router, acl.NewChecker(db, 0), sender, hs.TrackPresence, log)
+	acls := acl.NewChecker(db, 0)
+	processor := edu.NewProcessor(router, acls, sender, hs.TrackPresence, log)
 
 	log.Info().
 		Str("server_name", hs.ServerName).
@@ -244,6 +245,7 @@ func buildHandler(ctx context.Context, cfg *config.Config, up *proxy.Proxy, log 
 			MaxWait:     time.Duration(cfg.PDUShadow.MaxWaitSeconds) * time.Second,
 			PrevWait:    time.Duration(cfg.PDUShadow.PrevWaitSeconds) * time.Second,
 			ServerName:  hs.ServerName,
+			ACL:         acls,
 		}, log)
 		log.Info().Msg("PDU shadow on: PDUs Synapse accepts are checked once it has persisted them")
 	}
@@ -350,7 +352,9 @@ func openDatabase(ctx context.Context, cfg *config.Config, hs *synapsecfg.Config
 // pduSink adapts the PDU shadow to txn.PDUSink.
 type pduSink struct{ l *pduverify.Live }
 
-func (p pduSink) Prepare(body []byte) txn.PDUPending { return p.l.Prepare(body) }
+func (p pduSink) Prepare(origin string, body []byte) txn.PDUPending {
+	return p.l.Prepare(origin, body)
+}
 
 // roleTables is every table the read-only role is granted: those the EDU path
 // reads (package store) and those the PDU checker reads (package pdustore).

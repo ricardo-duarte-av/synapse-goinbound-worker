@@ -523,7 +523,7 @@ type pduPending struct {
 	body string
 }
 
-func (p *pduSink) Prepare(b []byte) PDUPending {
+func (p *pduSink) Prepare(_ string, b []byte) PDUPending {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.prepared++
