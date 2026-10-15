@@ -42,6 +42,10 @@ func TestPDUEventDict(t *testing.T) {
 			t.Errorf("%s: got %s, want %s", c.name, gb, c.want)
 		}
 	}
+	// Pulled events have no request time: age is dropped.
+	if got, _ := pduEventDict([]byte(`{"type":"m.room.message","unsigned":{"age":5}}`), time.Time{}, ""); len(got["unsigned"].(map[string]any)) != 0 {
+		t.Errorf("pulled: unsigned %v", got["unsigned"])
+	}
 	if _, err := pduEventDict([]byte(`{"type":"x","unsigned":[]}`), at, ""); err == nil {
 		t.Error("a non-object unsigned was accepted; Synapse raises on it")
 	}

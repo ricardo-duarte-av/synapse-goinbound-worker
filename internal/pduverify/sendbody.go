@@ -104,7 +104,7 @@ func pduEventDict(raw []byte, received time.Time, replaces string) (map[string]a
 		}
 		age, hasAge := kept["age"]
 		delete(kept, "age")
-		if n, ok := pyInt(age); hasAge && ok {
+		if n, ok := pyInt(age); hasAge && ok && !received.IsZero() {
 			kept["age_ts"] = json.Number(fmt.Sprint(received.UnixMilli() - n))
 		}
 		ev["unsigned"] = kept

@@ -52,7 +52,7 @@ type fakePersist struct {
 	fail bool
 }
 
-func (f *fakePersist) SendEvents(_ context.Context, _ string, entries []json.RawMessage) error {
+func (f *fakePersist) SendEvents(_ context.Context, _ string, entries []json.RawMessage, _ bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.fail {

@@ -67,3 +67,26 @@ func TestStateCache(t *testing.T) {
 		t.Error("an entry outlived its hour")
 	}
 }
+
+// EventContext.for_outlier, serialized as fed_send_events sends it.
+func TestOutlierEntry(t *testing.T) {
+	rv, _ := pdu.LookupRoomVersion("10")
+	raw := []byte(`{"type":"m.room.member","state_key":"@a:x","sender":"@a:x","room_id":"!r:x","content":{"membership":"join"},"depth":1,"origin_server_ts":1,"prev_events":[],"auth_events":[],"hashes":{"sha256":"x"},"signatures":{},"unsigned":{}}`)
+	ev, err := pdu.ParseEvent(raw, "$e", rv, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := OutlierEntry(raw, ev, map[string]any{"soft_failed": true}, RejectedAuthError)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range map[string]string{
+		"outlier": "true", "rejected_reason": `"auth_error"`, "room_version": `"10"`,
+		"internal_metadata": `{"outlier":true,"soft_failed":true}`,
+		"context":           `{"state_group":null,"state_group_before_event":null,"rejected":"auth_error","state_group_deltas":[],"state_delta_due_to_event":null,"app_service_id":null,"partial_state":false}`,
+	} {
+		if got := gjson.GetBytes(b, path).Raw; got != want {
+			t.Errorf("%s: %s, want %s", path, got, want)
+		}
+	}
+}

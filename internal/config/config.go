@@ -390,6 +390,9 @@ func (c *Config) validate() error {
 		return fmt.Errorf("modes.pdu is %s, so modes.edu must be canary:%d or more, or native: "+
 			"a write-mode origin's every transaction is ours", c.Modes.PDU, c.Modes.PDU.CanaryPercent)
 	}
+	if m := c.Write.MissingEvents; m != "" && m != "defer" && m != "fetch" {
+		return fmt.Errorf("write.missing_events is %q; it must be defer or fetch", m)
+	}
 	if c.Modes.PDU.ServesNatively() && c.Write.InstanceName == "" {
 		return fmt.Errorf("modes.pdu is %s, which writes; write.instance_name is required "+
 			"(a name no Synapse process uses, e.g. goinbound-worker)", c.Modes.PDU)
@@ -405,7 +408,15 @@ type Write struct {
 	// Role is the write role, granted exactly the tables write mode writes.
 	// Default "goinbound_rw".
 	Role string `yaml:"role"`
+	// MissingEvents is what write mode does with an event whose prev events
+	// are missing: "defer" (the default) leaves it staged for Synapse's
+	// worker; "fetch" fetches them from the origin as Synapse does, which
+	// contacts remote servers.
+	MissingEvents string `yaml:"missing_events"`
 }
+
+// FetchesMissingEvents says write.missing_events is fetch.
+func (w Write) FetchesMissingEvents() bool { return w.MissingEvents == "fetch" }
 
 // RoleName returns Role with its default applied.
 func (w Write) RoleName() string {

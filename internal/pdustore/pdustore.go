@@ -743,3 +743,63 @@ type CurrentEvent struct {
 	// pruned (whether it does depends on the redaction's validity).
 	Redacted bool
 }
+
+const (
+	qSeenEvents    = `SELECT event_id FROM events WHERE room_id = $1 AND event_id = ANY($2)`
+	qInTimeline    = `SELECT event_id FROM events WHERE event_id = ANY($1) AND NOT outlier`
+	qEventMetadata = `SELECT event_id, room_id, type, state_key FROM events WHERE event_id = ANY($1)`
+)
+
+// SeenEvents is have_seen_events: those of ids held in the room, outliers
+// and rejected ones included.
+func (s *Store) SeenEvents(ctx context.Context, roomID string, ids []string) (map[string]bool, error) {
+	return s.idSet(ctx, qSeenEvents, roomID, uniqueIDs(ids))
+}
+
+// InTimeline is have_events_in_timeline: those of ids held and not as
+// outliers.
+func (s *Store) InTimeline(ctx context.Context, ids []string) (map[string]bool, error) {
+	return s.idSet(ctx, qInTimeline, uniqueIDs(ids))
+}
+
+func (s *Store) idSet(ctx context.Context, q string, args ...any) (map[string]bool, error) {
+	rows, err := s.pool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("pdustore: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out[id] = true
+	}
+	return out, rows.Err()
+}
+
+// EventMeta is get_metadata_for_events' row.
+type EventMeta struct {
+	RoomID, Type string
+	StateKey     *string
+}
+
+// EventsMetadata is get_metadata_for_events.
+func (s *Store) EventsMetadata(ctx context.Context, ids []string) (map[string]EventMeta, error) {
+	rows, err := s.pool.Query(ctx, qEventMetadata, uniqueIDs(ids))
+	if err != nil {
+		return nil, fmt.Errorf("pdustore: event metadata: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]EventMeta{}
+	for rows.Next() {
+		var id string
+		var m EventMeta
+		if err := rows.Scan(&id, &m.RoomID, &m.Type, &m.StateKey); err != nil {
+			return nil, err
+		}
+		out[id] = m
+	}
+	return out, rows.Err()
+}

@@ -11,6 +11,8 @@ import (
 	"flag"
 	"fmt"
 	"github.com/jackc/pgx/v5"
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/fedclient"
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/fedfetch"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/inbound"
 	"net"
 	"net/http"
@@ -293,6 +295,26 @@ func buildHandler(ctx context.Context, cfg *config.Config, up *proxy.Proxy, log 
 			return nil, noop, err
 		}
 		proc = inbound.NewProcessor(wdb, pv, persister{repl, hs.Writers}, pst, hs.ServerName, log)
+		if cfg.Write.FetchesMissingEvents() {
+			line, err := hs.SigningKeyLine()
+			if err != nil {
+				db.Close()
+				return nil, noop, fmt.Errorf("write.missing_events is fetch: %w", err)
+			}
+			var allow func(string) bool
+			if hs.DomainWhitelist != nil {
+				allow = func(s string) bool { return hs.DomainWhitelist[s] }
+			}
+			fc, err := fedclient.New(hs.ServerName, line, allow, 2*time.Minute)
+			if err != nil {
+				db.Close()
+				return nil, noop, err
+			}
+			proc.EnableMissingEvents(&inbound.MissingDeps{
+				Fetch: fedfetch.New(fc, pst, pv, asker, hs.ServerName), Store: pst, Verifier: pv,
+			})
+			log.Info().Msg("Write mode fetches missing prev events from the origin")
+		}
 		fd := inbound.NewFrontDoor(inbound.FrontDoorDeps{
 			Store: pst, Verifier: pv, ACL: acls, Policy: asker, Processor: proc, Server: hs.ServerName,
 		})
@@ -395,8 +417,8 @@ type persister struct {
 	writers synapsecfg.Writers
 }
 
-func (p persister) SendEvents(ctx context.Context, roomID string, entries []json.RawMessage) error {
-	_, err := p.c.SendEvents(ctx, p.writers.EventsWriter(roomID), roomID, entries, false)
+func (p persister) SendEvents(ctx context.Context, roomID string, entries []json.RawMessage, backfilled bool) error {
+	_, err := p.c.SendEvents(ctx, p.writers.EventsWriter(roomID), roomID, entries, backfilled)
 	return err
 }
 

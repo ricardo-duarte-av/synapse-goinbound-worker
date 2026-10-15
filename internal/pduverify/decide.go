@@ -177,6 +177,11 @@ type DecideInput struct {
 	// Snapshot, when set, is the room as found before Synapse handled the
 	// event (the shadow's); otherwise one is taken now.
 	Snapshot *pdustore.Snapshot
+	// StateBefore, when set, is the state before a pulled event whose prev
+	// events are missing, resolved from the remotes' state at them
+	// (_compute_event_context_with_maybe_missing_prevs). It is stored in
+	// full, and soft-fail resolves it against the forward extremities.
+	StateBefore pdu.StateMap
 }
 
 // Decision is what to do with a staged event.
@@ -304,7 +309,7 @@ func (s *Verifier) Decide(ctx context.Context, in DecideInput) (*Decision, error
 			return nil, err
 		}
 	}
-	if !snap.PrevsInTimeline {
+	if !snap.PrevsInTimeline && in.StateBefore == nil {
 		d.Defer = "missing prevs"
 		return d, nil
 	}
@@ -313,8 +318,11 @@ func (s *Verifier) Decide(ctx context.Context, in DecideInput) (*Decision, error
 		return d, nil
 	}
 
-	// compute_event_context: the state before, through the cache.
-	if why, err := s.resolveForEvent(ctx, in, ev, d); err != nil || why != "" {
+	// compute_event_context: the state before, through the cache, or as
+	// given (state_ids_before_event: stored in full, nothing bumped).
+	if in.StateBefore != nil {
+		d.Entry, d.Before = &StateEntry{state: in.StateBefore}, in.StateBefore
+	} else if why, err := s.resolveForEvent(ctx, in, ev, d); err != nil || why != "" {
 		if err != nil {
 			return nil, err
 		}
@@ -358,7 +366,20 @@ func (s *Verifier) Decide(ctx context.Context, in DecideInput) (*Decision, error
 		d.Metadata["recheck_redaction"] = true
 	}
 	d.SoftFailed = meta["soft_failed"] == true
-	if !rej {
+	if !rej && !snap.PrevsInTimeline {
+		// _check_for_soft_fail with missing prevs: "current state" is a
+		// resolution across the forward extremities and the state before.
+		soft, err := s.softFailedWithGap(ctx, ev, snap, d.Before)
+		if err != nil {
+			var re *pdu.RaiseError
+			if errors.As(err, &re) {
+				d.Defer = "soft fail: " + err.Error()
+				return d, nil
+			}
+			return nil, err
+		}
+		d.SoftFailed = d.SoftFailed || soft
+	} else if !rej {
 		soft, _, err := s.softFailed(ctx, ev, snap)
 		if err != nil {
 			var re *pdu.RaiseError
@@ -813,3 +834,78 @@ func deviceResyncNeeded(content gjson.Result, cached map[string][]byte) bool {
 
 // jsonEqualRaw is Python's == on two decoded JSON values.
 func jsonEqualRaw(a, b string) bool { return sameJSON(a, b) }
+
+// PulledEvent is the copy Synapse holds of a pulled PDU: event_from_pdu_json
+// with no request time, so any age is dropped, with a policy server's
+// signatures added when it signed.
+func PulledEvent(raw []byte, policyServer string, policySigs map[string]string) ([]byte, error) {
+	return StagedEvent(raw, time.Time{}, policyServer, policySigs)
+}
+
+// softFailedWithGap is _check_for_soft_fail for an event with missing prev
+// events.
+func (s *Verifier) softFailedWithGap(ctx context.Context, ev *pdu.Event, snap *pdustore.Snapshot, before pdu.StateMap) (bool, error) {
+	if sameSet(snap.Extremities, ev.PrevEvents) {
+		return false, nil
+	}
+	var sets []pdu.StateMap
+	seen := map[int64]bool{}
+	for _, x := range snap.Extremities {
+		g, err := s.st.StateGroupForEvent(ctx, x)
+		if errors.Is(err, pdustore.ErrNoStateGroup) {
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
+		if seen[g] {
+			continue
+		}
+		seen[g] = true
+		m, err := s.groups.get(ctx, s.st, g)
+		if err != nil {
+			return false, err
+		}
+		sets = append(sets, m)
+	}
+	sets = append(sets, before)
+	current, err := stateres.ResolveWith(ctx, ev.RoomID, ev.Room, sets, s.st, s.opts)
+	if err != nil {
+		if errors.Is(err, stateres.ErrUnsupported) {
+			return false, &pdu.RaiseError{Msg: "state resolution v1"}
+		}
+		return false, err
+	}
+	types, err := pdu.AuthTypesForEvent(ev.Room, ev)
+	if err != nil {
+		return false, err
+	}
+	var ids []string
+	for _, k := range types {
+		if id, ok := current[k]; ok {
+			ids = append(ids, id)
+		}
+	}
+	events, err := s.st.GetEvents(ctx, ids)
+	if err != nil {
+		return false, err
+	}
+	var auth []*pdu.Event
+	for _, id := range ids {
+		if e := events[id]; e != nil && !e.Rejected {
+			auth = append(auth, e)
+		}
+	}
+	if err := pdu.CheckStateDependentAuthRules(ev, auth); err != nil {
+		if pdu.IsAuthError(err) {
+			return true, nil
+		}
+		return false, err
+	}
+	return false, nil
+}
+
+// ResolveStates is resolve_events_with_store over the given state maps.
+func (s *Verifier) ResolveStates(ctx context.Context, roomID string, rv *pdu.RoomVersion, sets []pdu.StateMap) (pdu.StateMap, error) {
+	return stateres.ResolveWith(ctx, roomID, rv, sets, s.st, s.opts)
+}

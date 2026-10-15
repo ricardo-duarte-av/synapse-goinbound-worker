@@ -24,7 +24,7 @@ type Deciding interface {
 // Persisting sends events to the room's persister (fed_send_events), and
 // asks the device list writer to resync a remote user's devices.
 type Persisting interface {
-	SendEvents(ctx context.Context, roomID string, entries []json.RawMessage) error
+	SendEvents(ctx context.Context, roomID string, entries []json.RawMessage, backfilled bool) error
 	ResyncDevices(ctx context.Context, userID string) error
 }
 
@@ -44,6 +44,7 @@ type Processor struct {
 	persist Persisting
 	read    Reading
 	cache   *pduverify.StateCache
+	missing *MissingDeps
 	server  string
 	log     zerolog.Logger
 
@@ -75,6 +76,10 @@ func NewProcessor(db *DB, d Deciding, p Persisting, r Reading, server string, lo
 		ctx: ctx, cancel: cancel, deferred: map[string]deferral{},
 	}
 }
+
+// EnableMissingEvents lets the processor fetch missing prev events itself,
+// rather than leave such events to Synapse.
+func (p *Processor) EnableMissingEvents(m *MissingDeps) { p.missing = m }
 
 // Start runs _handle_old_staged_events now and every minute.
 func (p *Processor) Start() {
@@ -308,10 +313,25 @@ func (p *Processor) handle(ctx context.Context, room string, rv *pdu.RoomVersion
 	}()
 
 	start := time.Now()
-	d, err := p.decide.Decide(ctx, pduverify.DecideInput{
+	in := pduverify.DecideInput{
 		Origin: s.Origin, EventJSON: s.EventJSON, Metadata: s.InternalMetadata, EventID: s.EventID,
 		Room: rv, OurServer: p.server, Cache: p.cache,
-	})
+	}
+	d, err := p.decide.Decide(ctx, in)
+	if err == nil && d.Defer == "missing prevs" && p.missing != nil {
+		drop, merr := p.missingPrevs(ctx, s.Origin, rv, d.Event)
+		switch {
+		case merr != nil:
+			log.Info().Err(merr).Msg("Write mode: leaving an event with missing prevs to Synapse")
+			handled.WithLabelValues("deferred").Inc()
+			return outcomeDefer
+		case drop != "":
+			log.Warn().Str("why", drop).Msg("Rejecting: failed to fetch prev events")
+			handled.WithLabelValues("dropped").Inc()
+			return outcomeDone
+		}
+		d, err = p.decide.Decide(ctx, in)
+	}
 	switch {
 	case err != nil:
 		log.Warn().Err(err).Msg("Write mode: deciding failed; leaving the event to Synapse")
@@ -399,7 +419,7 @@ func (p *Processor) write(ctx context.Context, room string, s *Staged, d *pduver
 		_ = p.db.UnstagePush(ctx, s.EventID)
 		return err
 	}
-	if err := p.persist.SendEvents(ctx, room, []json.RawMessage{entry}); err != nil {
+	if err := p.persist.SendEvents(ctx, room, []json.RawMessage{entry}, false); err != nil {
 		if uerr := p.db.UnstagePush(ctx, s.EventID); uerr != nil {
 			p.log.Warn().Err(uerr).Msg("Error removing push actions after event persistence failure")
 		}
@@ -426,6 +446,14 @@ var (
 	resyncs = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "goinbound_write_device_resyncs_total",
 		Help: "Device resyncs asked for, for encrypted events from unknown devices or keys.",
+	})
+	pulledEvents = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "goinbound_write_pulled_events_total",
+		Help: "Missing prev events pulled from the origin and persisted.",
+	})
+	outliersPersisted = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "goinbound_write_outliers_total",
+		Help: "State and auth events fetched for missing prevs, persisted as outliers.",
 	})
 	pruned = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "goinbound_write_pruned_total",

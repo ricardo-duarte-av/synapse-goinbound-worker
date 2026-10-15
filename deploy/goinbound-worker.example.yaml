@@ -39,6 +39,9 @@ modes:
 # write:
 #   instance_name: goinbound-worker
 #   role: goinbound_rw
+#   # An event whose prev events are missing: defer (leave it staged for
+#   # Synapse's worker) or fetch (from the origin, as Synapse does).
+#   missing_events: defer
 
 # nginx connects here.
 listen:
