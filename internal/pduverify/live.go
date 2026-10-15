@@ -409,6 +409,7 @@ func (l *Live) check(j *job) {
 	}
 	if !persisted {
 		l.notPersisted(ctx, j.raw, rv, eventID, log)
+		l.decideNotPersisted(ctx, j, log)
 		return
 	}
 
@@ -639,7 +640,7 @@ var reasonLabels = []string{
 	"decide", "deferred: missing prevs", "deferred: partial state room", "deferred: push for an invite",
 	"deferred: state resolution v1", "deferred: auth", "deferred: soft fail", "deferred: push",
 	"deferred: prev event without state group", "deferred: not in room, invite rescission", "deferred",
-	"no decision", "decide failed", "not persisted",
+	"no decision", "decide failed", "not persisted", "still queued by Synapse",
 	"push not configured", "invite", "min depth", "no state before", "pruned", "redacted", "push",
 	"unparseable", "event id", "content hash", "state resolution", "auth",
 }
@@ -675,3 +676,31 @@ var (
 		Buckets: []float64{.1, .25, .5, 1, 2.5, 5, 10, 30, 60, 120, 300},
 	})
 )
+
+// decideNotPersisted checks write mode's decision for a PDU Synapse did not
+// persist: ignoring, dropping or deferring it agrees; persisting it does
+// not, unless Synapse still has it queued.
+func (l *Live) decideNotPersisted(ctx context.Context, j *job, log zerolog.Logger) {
+	d := j.decision
+	switch {
+	case j.decideErr != "":
+		l.record("decide", OutcomeSkipped, j.decideErr)
+		return
+	case d == nil:
+		l.record("decide", OutcomeSkipped, "no decision")
+		return
+	case d.Defer != "":
+		l.record("decide", OutcomeSkipped, "deferred: "+d.Defer)
+		return
+	case d.Ignore != "" || d.Drop != "":
+		l.record("decide", OutcomeMatch, "not persisted")
+		return
+	}
+	if staged, err := l.st.Staged(ctx, j.eventID); err == nil && staged {
+		l.record("decide", OutcomeSkipped, "still queued by Synapse")
+		return
+	}
+	l.record("decide", OutcomeMismatch, "decide")
+	log.Warn().Str("check", "decide").Str("outcome", OutcomeMismatch).
+		Msg("PDU shadow: write mode would persist a PDU Synapse did not")
+}
