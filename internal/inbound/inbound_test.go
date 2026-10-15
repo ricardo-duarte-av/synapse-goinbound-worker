@@ -2,6 +2,7 @@ package inbound
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -16,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/dbrole"
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pdu"
 )
 
 // Tests that write run against a throwaway PostgreSQL holding Synapse's
@@ -269,6 +271,9 @@ func TestQueriesUseOnlyGrants(t *testing.T) {
 		{regexp.MustCompile(`(?i)\bFROM\s+(\w+)`), "SELECT"},
 		{regexp.MustCompile(`(?i)\bJOIN\s+(\w+)`), "SELECT"},
 	}
+	// Names that follow FROM without being tables: functions, and the
+	// recursive CTE of qStateHops.
+	notTables := map[string]bool{"unnest": true, "state": true}
 	queries := 0
 	for _, pkg := range pkgs {
 		for _, f := range pkg.Files {
@@ -289,6 +294,9 @@ func TestQueriesUseOnlyGrants(t *testing.T) {
 					queries++
 					for _, u := range uses {
 						for _, m := range u.re.FindAllStringSubmatch(sql, -1) {
+							if notTables[m[1]] {
+								continue
+							}
 							privs, ok := granted[m[1]]
 							if !ok {
 								t.Errorf("%s uses %s, which is not in Grants", id.Name, m[1])
@@ -322,5 +330,140 @@ func TestWriteRoleIsExact(t *testing.T) {
 		if _, err := d.pool.Exec(ctx, q); err == nil || !strings.Contains(err.Error(), "permission denied") {
 			t.Errorf("%s: %v, want permission denied", q, err)
 		}
+	}
+}
+
+func adminConn(t *testing.T) *pgx.Conn {
+	t.Helper()
+	c, err := pgx.Connect(context.Background(), os.Getenv("INBOUND_TEST_ADMIN_DSN"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close(context.Background()) })
+	return c
+}
+
+func groupRows(t *testing.T, c *pgx.Conn, g int64) (prev int64, rows map[string]string) {
+	t.Helper()
+	ctx := context.Background()
+	_ = c.QueryRow(ctx, `SELECT prev_state_group FROM state_group_edges WHERE state_group = $1`, g).Scan(&prev)
+	rows = map[string]string{}
+	r, err := c.Query(ctx, `SELECT type || '/' || state_key, event_id FROM state_groups_state WHERE state_group = $1`, g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for r.Next() {
+		var k, v string
+		r.Scan(&k, &v)
+		rows[k] = v
+	}
+	return prev, rows
+}
+
+func TestStoreStateGroup(t *testing.T) {
+	ctx := context.Background()
+	d := testDB(t, "goinbound-test")
+	c := adminConn(t)
+	create := pdu.StateKey{Type: "m.room.create"}
+	topic := pdu.StateKey{Type: "m.room.topic"}
+
+	full, err := d.StoreStateGroup(ctx, "$create", "!r:x", 0, nil, pdu.StateMap{create: "$create"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prev, rows := groupRows(t, c, full); prev != 0 || rows["m.room.create/"] != "$create" || len(rows) != 1 {
+		t.Fatalf("full group: prev %d rows %v", prev, rows)
+	}
+	delta, err := d.StoreStateGroup(ctx, "$topic", "!r:x", full, pdu.StateMap{topic: "$topic"}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prev, rows := groupRows(t, c, delta); prev != full || len(rows) != 1 || rows["m.room.topic/"] != "$topic" {
+		t.Fatalf("delta group: prev %d rows %v", prev, rows)
+	}
+
+	// _count_state_group_hops_txn counts the group itself: the full group
+	// is 1, so after 98 more deltas the chain is 100 long, and the next
+	// group is stored in full.
+	last := delta
+	for i := 0; i < 98; i++ {
+		if last, err = d.StoreStateGroup(ctx, fmt.Sprintf("$e%d", i), "!r:x", last, pdu.StateMap{topic: fmt.Sprintf("$e%d", i)}, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	loaded := 0
+	load := func(g int64) (pdu.StateMap, error) {
+		loaded++
+		return pdu.StateMap{create: "$create", topic: "$e98"}, nil
+	}
+	end, err := d.StoreStateGroup(ctx, "$end", "!r:x", last, pdu.StateMap{topic: "$end"}, nil, load)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prev, rows := groupRows(t, c, end); prev != 0 || len(rows) != 2 || rows["m.room.topic/"] != "$end" || loaded != 1 {
+		t.Fatalf("after 100 hops: prev %d rows %v loaded %d", prev, rows, loaded)
+	}
+
+	// A deleted prev group is refused.
+	if _, err := d.StoreStateGroup(ctx, "$x", "!r:x", 999999999, pdu.StateMap{topic: "$x"}, nil, nil); !errors.Is(err, ErrMissingGroup) {
+		t.Fatalf("missing prev: %v", err)
+	}
+}
+
+func TestBumpDeletion(t *testing.T) {
+	ctx := context.Background()
+	d := testDB(t, "goinbound-test")
+	c := adminConn(t)
+	g, err := d.StoreStateGroup(ctx, "$e", "!r:x", 0, nil, pdu.StateMap{{Type: "m.room.create"}: "$e"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Exec(ctx, `INSERT INTO state_groups_pending_deletion (state_group, insertion_ts) VALUES ($1, 5)`, g); err != nil {
+		t.Fatal(err)
+	}
+	var seq0 int64
+	c.QueryRow(ctx, `SELECT sequence_number FROM state_groups_pending_deletion WHERE state_group = $1`, g).Scan(&seq0)
+	missing, err := d.BumpDeletion(ctx, []int64{g, 888888888})
+	if err != nil || len(missing) != 1 || missing[0] != 888888888 {
+		t.Fatalf("missing %v, %v", missing, err)
+	}
+	var seq, ts int64
+	c.QueryRow(ctx, `SELECT sequence_number, insertion_ts FROM state_groups_pending_deletion WHERE state_group = $1`, g).Scan(&seq, &ts)
+	if seq == seq0 || ts == 5 {
+		t.Errorf("not bumped: sequence %d -> %d, ts %d", seq0, seq, ts)
+	}
+}
+
+func TestStagePushAndTxnResponse(t *testing.T) {
+	ctx := context.Background()
+	d := testDB(t, "goinbound-test")
+	c := adminConn(t)
+	rows := []PushRow{{UserID: "@a:x", Actions: "", Notif: true}, {UserID: "@b:x", Actions: `["notify"]`, Notif: true, Highlight: true, Unread: true, ThreadID: "main"}}
+	if err := d.StagePush(ctx, "$e", rows); err != nil {
+		t.Fatal(err)
+	}
+	var n, hl int
+	c.QueryRow(ctx, `SELECT count(*), sum(highlight) FROM event_push_actions_staging WHERE event_id = '$e'`).Scan(&n, &hl)
+	if n != 2 || hl != 1 {
+		t.Fatalf("staged %d rows, %d highlights", n, hl)
+	}
+	if err := d.UnstagePush(ctx, "$e"); err != nil {
+		t.Fatal(err)
+	}
+	c.QueryRow(ctx, `SELECT count(*) FROM event_push_actions_staging`).Scan(&n)
+	if n != 0 {
+		t.Fatalf("%d rows left", n)
+	}
+
+	if err := d.SetTxnResponse(ctx, "a.example", "t1", 200, []byte(`{"pdus":{}}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetTxnResponse(ctx, "a.example", "t1", 200, []byte(`{"pdus":{"$x":{}}}`)); err != nil {
+		t.Fatal(err)
+	}
+	var body string
+	c.QueryRow(ctx, `SELECT convert_from(response_json, 'UTF8') FROM received_transactions WHERE origin = 'a.example' AND transaction_id = 't1'`).Scan(&body)
+	if body != `{"pdus":{}}` {
+		t.Errorf("stored %s, want the first answer", body)
 	}
 }
