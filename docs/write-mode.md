@@ -77,7 +77,7 @@ Everything else goes through Synapse's replication endpoints:
 | 8 | Missing prevs and state: `/get_missing_events`, `/state_ids`, `/event`, outliers, failed pull attempts | **ported, unverified** (`write.missing_events: fetch`; default `defer`). Deferred still: a pulled event that needs a key we lack, has a bad signature or hash, was seen as an outlier, or has failed pulls (Synapse retries those in the background). The shadow cannot check this path: Synapse's own fetches happen out of its sight |
 | 9 | Side effects: device resync, guest kicks | **done**: device resync (stale mark, then `multi_user_device_resync`); guest-access changes are deferred to Synapse (`allow_guest_access: false` here) |
 | 10 | Rejected events' context | **done** (same groups, `rejected` set; mapped to the group before) |
-| 11 | State resolution v1: v1 rooms carry 1.4% of events (2,740 of the last 200k, 2026-10-15) | todo |
+| 11 | State resolution v1 | **done** (ported earlier, `a4f5864`); rejected events now left out, as v1's state_map_factory does. v1 forks are rare: 8 in the last 2M stream orderings, all matching |
 | 12 | Verification in reverse: after Go writes, re-derive and compare | todo |
 | 13 | A/B replay on two copies of a snapshot | todo |
 

@@ -30,7 +30,7 @@ func (r *resolver) resolveV1(stateSets []pdu.StateMap) (pdu.StateMap, error) {
 		return nil, err
 	}
 	for id := range needed {
-		if ev := r.events[id]; ev != nil && ev.RoomID != r.roomID {
+		if ev := r.eventV1(id); ev != nil && ev.RoomID != r.roomID {
 			return nil, &pdu.RaiseError{Msg: "event " + id + " is in another room"}
 		}
 	}
@@ -40,7 +40,7 @@ func (r *resolver) resolveV1(stateSets []pdu.StateMap) (pdu.StateMap, error) {
 	authIDs := map[pdu.StateKey]string{}
 	for _, ids := range conflicted {
 		for id := range ids {
-			ev := r.events[id]
+			ev := r.eventV1(id)
 			if ev == nil {
 				continue
 			}
@@ -66,7 +66,7 @@ func (r *resolver) resolveV1(stateSets []pdu.StateMap) (pdu.StateMap, error) {
 		return nil, err
 	}
 	for _, id := range more {
-		if ev := r.events[id]; ev != nil && ev.RoomID != r.roomID {
+		if ev := r.eventV1(id); ev != nil && ev.RoomID != r.roomID {
 			return nil, &pdu.RaiseError{Msg: "event " + id + " is in another room"}
 		}
 	}
@@ -76,7 +76,7 @@ func (r *resolver) resolveV1(stateSets []pdu.StateMap) (pdu.StateMap, error) {
 	for k, ids := range conflicted {
 		var evs []*pdu.Event
 		for id := range ids {
-			if ev := r.events[id]; ev != nil {
+			if ev := r.eventV1(id); ev != nil {
 				evs = append(evs, ev)
 			}
 		}
@@ -89,7 +89,7 @@ func (r *resolver) resolveV1(stateSets []pdu.StateMap) (pdu.StateMap, error) {
 	}
 	auth := map[pdu.StateKey]*pdu.Event{}
 	for k, id := range authIDs {
-		if ev := r.events[id]; ev != nil {
+		if ev := r.eventV1(id); ev != nil {
 			auth[k] = ev
 		}
 	}
@@ -269,4 +269,15 @@ func authList(m map[pdu.StateKey]*pdu.Event) []*pdu.Event {
 		out = append(out, ev)
 	}
 	return out
+}
+
+// eventV1 is an event as v1's state_map_factory returns it:
+// StateResolutionStore.get_events with allow_rejected False, so a rejected
+// event is as absent as one we do not hold.
+func (r *resolver) eventV1(id string) *pdu.Event {
+	ev := r.events[id]
+	if ev == nil || ev.Rejected {
+		return nil
+	}
+	return ev
 }
