@@ -6,9 +6,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/jackc/pgx/v5"
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/inbound"
 	"net"
 	"net/http"
 	"net/http/pprof"
@@ -220,7 +223,9 @@ func buildHandler(ctx context.Context, cfg *config.Config, up *proxy.Proxy, log 
 
 	var live *pduverify.Live
 	var pst *pdustore.Store
-	if cfg.Modes.PDU.Kind == config.ModeShadow {
+	var pv *pduverify.Verifier
+	var asker pduverify.PolicyAsker
+	if cfg.Modes.PDU.Kind == config.ModeShadow || cfg.Modes.PDU.ServesNatively() {
 		maxConns := int32(cfg.PDUShadow.MaxConns)
 		if maxConns == 0 {
 			maxConns = 4
@@ -230,7 +235,7 @@ func buildHandler(ctx context.Context, cfg *config.Config, up *proxy.Proxy, log 
 			db.Close()
 			return nil, noop, fmt.Errorf("pdu shadow: %w", err)
 		}
-		pv := pduverify.New(pst, stateres.Options{})
+		pv = pduverify.New(pst, stateres.Options{})
 		if cfg.PDUShadow.StateCacheEntries > 0 {
 			pv.SetStateCacheEntries(cfg.PDUShadow.StateCacheEntries)
 		}
@@ -241,7 +246,6 @@ func buildHandler(ctx context.Context, cfg *config.Config, up *proxy.Proxy, log 
 			pv.EnablePush(pc)
 		}
 		// The policy servers Synapse asks are asked too, signed as us.
-		var asker pduverify.PolicyAsker
 		var allow func(string) bool
 		if hs.DomainWhitelist != nil {
 			allow = func(s string) bool { return hs.DomainWhitelist[s] }
@@ -280,9 +284,30 @@ func buildHandler(ctx context.Context, cfg *config.Config, up *proxy.Proxy, log 
 	if live != nil {
 		opts.PDUs = pduSink{live}
 	}
+	var proc *inbound.Processor
+	var wdb *inbound.DB
+	if cfg.Modes.PDU.ServesNatively() {
+		wdb, err = openWriteDatabase(ctx, cfg, hs, log)
+		if err != nil {
+			db.Close()
+			return nil, noop, err
+		}
+		proc = inbound.NewProcessor(wdb, pv, persister{repl, hs.Writers}, pst, hs.ServerName, log)
+		fd := inbound.NewFrontDoor(inbound.FrontDoorDeps{
+			Store: pst, Verifier: pv, ACL: acls, Policy: asker, Processor: proc, Server: hs.ServerName,
+		})
+		opts.PDUMode, opts.PDUServer, opts.Responses = cfg.Modes.PDU, frontDoor{fd}, wdb
+		proc.Start()
+		log.Warn().Str("mode", cfg.Modes.PDU.String()).Str("instance", cfg.Write.InstanceName).
+			Msg("Write mode on: PDUs of the selected origins are persisted here")
+	}
 	h := txn.NewHandler(opts)
 	return h, func() {
 		h.Close()
+		if proc != nil {
+			proc.Close()
+			wdb.Close()
+		}
 		if live != nil {
 			live.Close()
 			pst.Close()
@@ -362,6 +387,67 @@ func openDatabase(ctx context.Context, cfg *config.Config, hs *synapsecfg.Config
 	}
 	log.Info().Str("role", role).Msg("Created or repaired the read-only role, and connected as it")
 	return db, storeCfg, nil
+}
+
+// persister sends events to the room's event persister.
+type persister struct {
+	c       *replication.Client
+	writers synapsecfg.Writers
+}
+
+func (p persister) SendEvents(ctx context.Context, roomID string, entries []json.RawMessage) error {
+	_, err := p.c.SendEvents(ctx, p.writers.EventsWriter(roomID), roomID, entries, false)
+	return err
+}
+
+// frontDoor adapts write mode's front door to txn.PDUServer.
+type frontDoor struct{ f *inbound.FrontDoor }
+
+func (f frontDoor) PlanPDUs(ctx context.Context, origin string, pdus []json.RawMessage, at time.Time) (txn.PDURun, string) {
+	p, why := f.f.PlanPDUs(ctx, origin, pdus, at)
+	if why != "" {
+		return nil, why
+	}
+	return p, ""
+}
+
+// openWriteDatabase connects as the write role, creating or repairing it
+// first with homeserver.yaml's credentials: every start, since the grants
+// must be exactly inbound.Grants and Ensure makes them so.
+func openWriteDatabase(ctx context.Context, cfg *config.Config, hs *synapsecfg.Config, log zerolog.Logger) (*inbound.DB, error) {
+	role := cfg.Write.RoleName()
+	if !hs.Database.Present {
+		return nil, errors.New("write mode: homeserver.yaml has no database block")
+	}
+	password := dbrole.Password(hs.Database.Password, role)
+	ensureCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	err := dbrole.Ensure(ensureCtx, hs.Database.DSN(), dbrole.Spec{
+		Role: role, Password: password, Writes: inbound.Grants, Sequences: inbound.Sequences,
+	})
+	cancel()
+	if err != nil {
+		return nil, fmt.Errorf("write role %s: %w", role, err)
+	}
+	serving := hs.Database
+	serving.User, serving.Password = role, password
+	dsn := serving.DSN()
+	if cfg.Database.DSN != "" {
+		// The read-only role's direct connection, as the write role.
+		c, err := pgx.ParseConfig(cfg.Database.DSN)
+		if err != nil {
+			return nil, err
+		}
+		dsn = fmt.Sprintf("host=%s port=%d dbname=%s user=%s", c.Host, c.Port, c.Database, role)
+		if password != "" {
+			dsn += " password=" + password
+		}
+	}
+	db, err := inbound.Open(ctx, dsn, cfg.Write.InstanceName)
+	if err != nil {
+		return nil, fmt.Errorf("write role %s: %w", role, err)
+	}
+	log.Info().Str("role", role).Msg("Connected to the database as the write role")
+	return db, nil
 }
 
 // pduSink adapts the PDU shadow to txn.PDUSink.

@@ -26,6 +26,14 @@ const (
 	policyAsk    = "Synapse asks"
 )
 
+// The verdicts, for write mode.
+const (
+	PolicyNone   = policyNone
+	PolicyExempt = policyExempt
+	PolicySigned = policySigned
+	PolicyAsk    = policyAsk
+)
+
 // PolicyVerdict is our verdict on a PDU, decided when it arrives: the
 // policy server is read from the room's current state, as Synapse reads it.
 type PolicyVerdict struct {

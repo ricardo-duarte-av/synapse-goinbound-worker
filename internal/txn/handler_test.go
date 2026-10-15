@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -443,19 +444,22 @@ func TestBodyOverLimitIsStreamedWhole(t *testing.T) {
 }
 
 func TestClassify(t *testing.T) {
-	if edus, reason := classify([]byte(`{"origin":"x"}`)); reason != "" || len(edus) != 0 {
+	if edus, _, reason := classify([]byte(`{"origin":"x"}`)); reason != "" || len(edus) != 0 {
 		t.Errorf("no pdus, no edus: %v %q (absent lists are empty, units.py:101)", edus, reason)
 	}
-	if _, reason := classify([]byte(`{"pdus":null,"edus":null}`)); reason != "" {
+	if _, _, reason := classify([]byte(`{"pdus":null,"edus":null}`)); reason != "" {
 		t.Errorf("null lists: %q", reason)
 	}
-	if _, reason := classify([]byte(`{"pdus":"x"}`)); reason != reasonMalformed {
+	if _, _, reason := classify([]byte(`{"pdus":"x"}`)); reason != reasonMalformed {
 		t.Errorf("pdus not a list: %q", reason)
 	}
-	if _, reason := classify([]byte(`{"pdus":[` + strings.Repeat(`{},`, 50) + `{}]}`)); reason != reasonLimits {
+	if _, _, reason := classify([]byte(`{"pdus":[` + strings.Repeat(`{},`, 50) + `{}]}`)); reason != reasonLimits {
 		t.Errorf("51 PDUs: %q, want the limit (Synapse answers 400)", reason)
 	}
-	edus, reason := classify([]byte(`{"edus":[{"edu_type":"a","content":{"k":1}},{"edu_type":"b","content":{}}]}`))
+	if _, pdus, reason := classify([]byte(`{"pdus":[{"a":1},{"b":2}]}`)); reason != "" || len(pdus) != 2 {
+		t.Errorf("pdus: %d %q", len(pdus), reason)
+	}
+	edus, _, reason := classify([]byte(`{"edus":[{"edu_type":"a","content":{"k":1}},{"edu_type":"b","content":{}}]}`))
 	if reason != "" || len(edus) != 2 || edus[0].Type != "a" || edus[1].Type != "b" {
 		t.Errorf("order or content lost: %+v %q", edus, reason)
 	}
@@ -562,5 +566,99 @@ func TestPDUShadowGetsAcceptedPDUTransactions(t *testing.T) {
 				t.Errorf("PDU transactions did not reach Synapse")
 			}
 		})
+	}
+}
+
+type fakePDUServer struct {
+	reason  string
+	results map[string]json.RawMessage
+	planned atomic.Int32
+	ran     atomic.Int32
+}
+
+type fakeRun struct{ f *fakePDUServer }
+
+func (r fakeRun) Run(context.Context) map[string]json.RawMessage {
+	r.f.ran.Add(1)
+	return r.f.results
+}
+
+func (f *fakePDUServer) PlanPDUs(_ context.Context, _ string, pdus []json.RawMessage, _ time.Time) (PDURun, string) {
+	f.planned.Add(1)
+	if f.reason != "" {
+		return nil, f.reason
+	}
+	return fakeRun{f}, ""
+}
+
+type fakeResponses struct {
+	mu    sync.Mutex
+	saved map[string]string
+}
+
+func (f *fakeResponses) SetTxnResponse(_ context.Context, origin, txnID string, code int, body []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.saved[origin+"/"+txnID] = fmt.Sprintf("%d %s", code, body)
+	return nil
+}
+
+func pduRig(t *testing.T, edu, pduMode config.Mode, ps *fakePDUServer) (*rig, *fakeResponses) {
+	t.Helper()
+	r := newRig(t, edu)
+	resp := &fakeResponses{saved: map[string]string{}}
+	r.h.pduMode, r.h.pduServer, r.h.responses = pduMode, ps, resp
+	return r, resp
+}
+
+const pduTxn = `{"pdus":[{"room_id":"!r:x"}],"edus":[{"edu_type":"m.typing","content":{"room_id":"!r:x","user_id":"@u:remote.example","typing":true}}]}`
+
+// Write mode answers a PDU transaction itself, with each PDU's entry, in
+// canonical JSON, and stores the answer as Synapse does.
+func TestWriteModeServesPDUTransactions(t *testing.T) {
+	ps := &fakePDUServer{results: map[string]json.RawMessage{
+		"$b": json.RawMessage(`{}`),
+		"$a": json.RawMessage(`{"errcode":"M_FORBIDDEN","error":"Server is banned from room"}`),
+	}}
+	r, resp := pduRig(t, config.Mode{Kind: config.ModeNative}, config.Mode{Kind: config.ModeNative}, ps)
+	rec := send(t, r.h, "remote.example", "t1", pduTxn)
+	want := `{"pdus":{"$a":{"errcode":"M_FORBIDDEN","error":"Server is banned from room"},"$b":{}}}`
+	if rec.Code != 200 || rec.Body.String() != want {
+		t.Fatalf("answer %d %s", rec.Code, rec.Body)
+	}
+	if r.up.count() != 0 {
+		t.Error("proxied")
+	}
+	if len(r.sender.list()) != 1 {
+		t.Errorf("EDUs not forwarded: %v", r.sender.list())
+	}
+	if got := resp.saved["remote.example/t1"]; got != "200 "+want {
+		t.Errorf("stored %q", got)
+	}
+	// EDU-only answers are stored too.
+	send(t, r.h, "remote.example", "t2", eduOnly)
+	if got := resp.saved["remote.example/t2"]; got != `200 {"pdus":{}}` {
+		t.Errorf("EDU-only stored %q", got)
+	}
+}
+
+func TestWriteModeProxiesWhatItCannotPlan(t *testing.T) {
+	ps := &fakePDUServer{reason: "pdu_key_unknown"}
+	r, resp := pduRig(t, config.Mode{Kind: config.ModeNative}, config.Mode{Kind: config.ModeNative}, ps)
+	send(t, r.h, "remote.example", "t1", pduTxn)
+	if r.up.count() != 1 || ps.ran.Load() != 0 || len(r.sender.list()) != 0 {
+		t.Errorf("proxied %d, ran %d, forwarded %v", r.up.count(), ps.ran.Load(), r.sender.list())
+	}
+	if len(resp.saved) != 0 {
+		t.Error("stored an answer Synapse gave")
+	}
+}
+
+func TestWriteModeCanaryLeavesOtherOriginsToSynapse(t *testing.T) {
+	ps := &fakePDUServer{results: map[string]json.RawMessage{}}
+	r, _ := pduRig(t, config.Mode{Kind: config.ModeNative}, config.Mode{Kind: config.ModeCanary, CanaryPercent: 0}, ps)
+	send(t, r.h, "remote.example", "t1", pduTxn)
+	if r.up.count() != 1 || ps.planned.Load() != 0 {
+		t.Errorf("proxied %d, planned %d", r.up.count(), ps.planned.Load())
 	}
 }

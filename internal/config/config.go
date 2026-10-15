@@ -94,10 +94,11 @@ type Modes struct {
 	// EDU is how EDU-only transactions are served: proxy, shadow, canary:N
 	// or native.
 	EDU Mode `yaml:"edu"`
-	// PDU is how transactions carrying any PDU are served. They always go to
-	// the Python worker whole, EDUs included: proxy does only that, shadow
-	// also checks each PDU afterwards against what Synapse decided. There
-	// is no native PDU handling.
+	// PDU is how transactions carrying any PDU are served: proxy sends them
+	// to the Python worker whole, EDUs included; shadow also checks each
+	// PDU afterwards against what Synapse decided; canary:N and native are
+	// write mode (docs/write-mode.md), for N% of origins or all of them,
+	// with the shadow still checking every PDU. Write mode needs write.
 	PDU Mode `yaml:"pdu"`
 }
 
@@ -116,6 +117,8 @@ type Config struct {
 	Shadow   Shadow   `yaml:"shadow"`
 	// PDUShadow tunes modes.pdu: shadow.
 	PDUShadow PDUShadow `yaml:"pdu_shadow"`
+	// Write configures write mode (modes.pdu canary:N or native).
+	Write Write `yaml:"write"`
 
 	// Modes says, per kind of payload, whether it is proxied, shadowed or
 	// served here. Both are required: what goes where is spelled out, never
@@ -376,12 +379,40 @@ func (c *Config) validate() error {
 		return fmt.Errorf("modes.edu is required: one of proxy, shadow, canary:N, native")
 	}
 	if c.Modes.PDU.Kind == "" {
-		return fmt.Errorf("modes.pdu is required: proxy or shadow")
+		return fmt.Errorf("modes.pdu is required: one of proxy, shadow, canary:N, native")
 	}
-	if c.Modes.PDU.Kind != ModeProxy && c.Modes.PDU.Kind != ModeShadow {
-		return fmt.Errorf("modes.pdu is %s, but PDUs are never served here; it must be proxy or shadow", c.Modes.PDU)
+	switch {
+	case c.Modes.PDU.Kind == ModeNative && c.Modes.EDU.Kind != ModeNative:
+		return fmt.Errorf("modes.pdu is native, so modes.edu must be native too: " +
+			"a write-mode origin's every transaction is ours")
+	case c.Modes.PDU.Kind == ModeCanary && !(c.Modes.EDU.Kind == ModeNative ||
+		c.Modes.EDU.Kind == ModeCanary && c.Modes.EDU.CanaryPercent >= c.Modes.PDU.CanaryPercent):
+		return fmt.Errorf("modes.pdu is %s, so modes.edu must be canary:%d or more, or native: "+
+			"a write-mode origin's every transaction is ours", c.Modes.PDU, c.Modes.PDU.CanaryPercent)
+	}
+	if c.Modes.PDU.ServesNatively() && c.Write.InstanceName == "" {
+		return fmt.Errorf("modes.pdu is %s, which writes; write.instance_name is required "+
+			"(a name no Synapse process uses, e.g. goinbound-worker)", c.Modes.PDU)
 	}
 	return nil
+}
+
+// Write configures write mode.
+type Write struct {
+	// InstanceName is ours in Synapse's lock tables. No Synapse process may
+	// have it: a lock is taken over by its holder's own name.
+	InstanceName string `yaml:"instance_name"`
+	// Role is the write role, granted exactly the tables write mode writes.
+	// Default "goinbound_rw".
+	Role string `yaml:"role"`
+}
+
+// RoleName returns Role with its default applied.
+func (w Write) RoleName() string {
+	if w.Role == "" {
+		return "goinbound_rw"
+	}
+	return w.Role
 }
 
 // MaxBodyBytes returns MaxBodyMB in bytes, with its default applied.

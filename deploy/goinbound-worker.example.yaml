@@ -17,15 +17,28 @@ homeserver_yaml: /etc/synapse/homeserver.yaml
 #   native    serve natively whenever possible; anything uncertain is still
 #             forwarded
 #
-# pdu: transactions carrying any PDU. They always go to the Python worker
-#   whole, their EDUs included.
-#   proxy     only that
+# pdu: transactions carrying any PDU.
+#   proxy     to the Python worker whole, their EDUs included
 #   shadow    and afterwards check each PDU Synapse accepted: signatures,
 #             state resolution, auth verdict and resulting state, against
 #             what Synapse stored. Read-only; see pdu_shadow below.
+#   canary:N  write mode for N% of origins (see write below); the shadow
+#             still checks every PDU
+#   native    write mode for every origin
 modes:
   edu: proxy
   pdu: proxy
+
+# Write mode (modes.pdu: canary:N or native) persists PDUs here, as Synapse's
+# inbound worker does (docs/write-mode.md). It needs modes.edu to serve the
+# same origins (canary:M with M >= N, or native), and a name for this process
+# in Synapse's lock tables that no Synapse process uses. The write role is
+# created or repaired on every start with homeserver.yaml's credentials, and
+# granted exactly the tables write mode writes.
+#
+# write:
+#   instance_name: goinbound-worker
+#   role: goinbound_rw
 
 # nginx connects here.
 listen:

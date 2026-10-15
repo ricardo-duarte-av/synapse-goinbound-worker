@@ -2,6 +2,7 @@ package pduverify
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -697,4 +698,23 @@ func (s *Verifier) CheckDecision(ctx context.Context, id string, d *Decision, sn
 // store state in full. For tests of write mode.
 func NewEntry(group, prev int64, delta, state pdu.StateMap) *StateEntry {
 	return &StateEntry{group: group, prevGroup: prev, delta: delta, state: state}
+}
+
+// StagedEvent is the copy of a received PDU Synapse stages: event.get_dict()
+// after event_from_pdu_json (unsigned stripped, age as age_ts against the
+// request time) and _check_sigs_and_hash (with a policy server's signatures
+// added, when it was asked and signed).
+func StagedEvent(raw []byte, received time.Time, policyServer string, policySigs map[string]string) ([]byte, error) {
+	dict, err := pduEventDict(raw, received, "")
+	if err != nil {
+		return nil, err
+	}
+	b, err := json.Marshal(dict)
+	if err != nil {
+		return nil, err
+	}
+	if len(policySigs) > 0 {
+		return addSignatures(b, policyServer, policySigs)
+	}
+	return b, nil
 }

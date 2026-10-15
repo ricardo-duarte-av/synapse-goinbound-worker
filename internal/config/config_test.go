@@ -130,3 +130,33 @@ func TestPDUShadowIsAllowed(t *testing.T) {
 		t.Errorf("pdu mode = %s", cfg.Modes.PDU)
 	}
 }
+
+func TestWriteMode(t *testing.T) {
+	w := "write:\n  instance_name: goinbound-worker\n"
+	ok := map[string]string{
+		"pdu canary under edu canary": base + w + "modes:\n  edu: canary:10\n  pdu: canary:5\n",
+		"pdu canary under edu native": base + w + "modes:\n  edu: native\n  pdu: canary:5\n",
+		"both native":                 base + w + "modes:\n  edu: native\n  pdu: native\n",
+	}
+	for name, y := range ok {
+		cfg, err := parse([]byte(y))
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
+			continue
+		}
+		if cfg.Write.RoleName() != "goinbound_rw" {
+			t.Errorf("%s: role %s", name, cfg.Write.RoleName())
+		}
+	}
+	bad := map[string]string{
+		"no instance name":        base + "modes:\n  edu: native\n  pdu: native\n",
+		"pdu canary over edu's":   base + w + "modes:\n  edu: canary:5\n  pdu: canary:10\n",
+		"pdu canary under shadow": base + w + "modes:\n  edu: shadow\n  pdu: canary:5\n",
+		"pdu native, edu canary":  base + w + "modes:\n  edu: canary:100\n  pdu: native\n",
+	}
+	for name, y := range bad {
+		if _, err := parse([]byte(y)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}

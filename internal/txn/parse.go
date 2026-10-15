@@ -62,36 +62,33 @@ const (
 // answer to it, so it gets the request. That includes a body that is not a
 // JSON object, "pdus" or "edus" that are not lists, and an EDU without a
 // string edu_type or with content that is not an object.
-func classify(body []byte) ([]edu.EDU, string) {
+func classify(body []byte) ([]edu.EDU, []json.RawMessage, string) {
 	var txn struct {
 		PDUs json.RawMessage `json:"pdus"`
 		EDUs json.RawMessage `json:"edus"`
 	}
 	if !isObject(body) {
-		return nil, reasonMalformed
+		return nil, nil, reasonMalformed
 	}
 	if err := json.Unmarshal(body, &txn); err != nil {
-		return nil, reasonMalformed
+		return nil, nil, reasonMalformed
 	}
 
 	// Absent or null is an empty list (units.py:101 _none_to_list).
 	var pdus, edus []json.RawMessage
 	if !isNull(txn.PDUs) {
 		if err := json.Unmarshal(txn.PDUs, &pdus); err != nil {
-			return nil, reasonMalformed
+			return nil, nil, reasonMalformed
 		}
 	}
 	if !isNull(txn.EDUs) {
 		if err := json.Unmarshal(txn.EDUs, &edus); err != nil {
-			return nil, reasonMalformed
+			return nil, nil, reasonMalformed
 		}
 	}
 
 	if len(pdus) > maxPDUs || len(edus) > maxEDUs {
-		return nil, reasonLimits
-	}
-	if len(pdus) > 0 {
-		return nil, reasonHasPDUs
+		return nil, nil, reasonLimits
 	}
 
 	out := make([]edu.EDU, 0, len(edus))
@@ -101,11 +98,11 @@ func classify(body []byte) ([]edu.EDU, string) {
 			Content json.RawMessage `json:"content"`
 		}
 		if err := json.Unmarshal(raw, &e); err != nil || e.Type == nil || !isObject(e.Content) {
-			return nil, reasonMalformed
+			return nil, nil, reasonMalformed
 		}
 		out = append(out, edu.EDU{Type: *e.Type, Content: e.Content})
 	}
-	return out, ""
+	return out, pdus, ""
 }
 
 func isNull(b json.RawMessage) bool {

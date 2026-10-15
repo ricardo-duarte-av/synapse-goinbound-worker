@@ -13,6 +13,8 @@
 package txn
 
 import (
+	"encoding/json"
+
 	"bytes"
 	"context"
 	"errors"
@@ -22,6 +24,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"maunium.net/go/mautrix/crypto/canonicaljson"
 	"maunium.net/go/mautrix/federation"
 
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/config"
@@ -58,6 +61,24 @@ type PDUPending interface {
 	Discard()
 }
 
+// PDUServer is write mode's /send side: PlanPDUs checks a transaction's
+// PDUs without writing anything, and says when Synapse must answer instead.
+type PDUServer interface {
+	PlanPDUs(ctx context.Context, origin string, pdus []json.RawMessage, requestTime time.Time) (PDURun, string)
+}
+
+// PDURun stages a planned transaction's PDUs, returning each one's entry
+// in the answer.
+type PDURun interface {
+	Run(ctx context.Context) map[string]json.RawMessage
+}
+
+// TxnResponses stores the answer given to a transaction
+// (set_received_txn_response).
+type TxnResponses interface {
+	SetTxnResponse(ctx context.Context, origin, txnID string, code int, canonicalJSON []byte) error
+}
+
 // EDUs plans and executes a transaction's EDUs.
 type EDUs interface {
 	Plan(ctx context.Context, origin string, edus []edu.EDU) ([]edu.Step, error)
@@ -76,6 +97,13 @@ type Options struct {
 	Upstream Upstream
 	Store    TxnStore
 	EDUs     EDUs
+	// PDUMode and PDUServer are write mode: transactions with PDUs from
+	// the origins PDUMode selects are served here. Nil PDUServer proxies
+	// them all.
+	PDUMode   config.Mode
+	PDUServer PDUServer
+	// Responses, when set, stores every answer given here.
+	Responses TxnResponses
 	// DomainWhitelist is federation_domain_whitelist; nil means none.
 	DomainWhitelist map[string]bool
 	MaxBody         int64
@@ -97,6 +125,9 @@ type Handler struct {
 	coord          *coordinator
 	shadow         *shadowRunner
 	pdus           PDUSink
+	pduMode        config.Mode
+	pduServer      PDUServer
+	responses      TxnResponses
 	log            zerolog.Logger
 }
 
@@ -117,6 +148,9 @@ func NewHandler(o Options) *Handler {
 		forwardTimeout: o.ForwardTimeout,
 		coord:          newCoordinator(responseCacheTTL),
 		pdus:           o.PDUs,
+		pduMode:        o.PDUMode,
+		pduServer:      o.PDUServer,
+		responses:      o.Responses,
 		log:            o.Log,
 	}
 	if h.mode.Kind == config.ModeShadow {
@@ -244,8 +278,25 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, body []byte, txn
 	// whose sender hung up, and an EDU forwarded halfway is worse than one
 	// forwarded fully or not at all.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), h.forwardTimeout)
+	var pduResults map[string]json.RawMessage
+	var pending PDUPending
+	if d.pdus != nil && h.pdus != nil {
+		// The shadow checks what we persist, as it checks Synapse.
+		pending = h.pdus.Prepare(origin, body)
+	}
+	pduDone := make(chan struct{})
+	go func() {
+		defer close(pduDone)
+		if d.pdus != nil {
+			pduResults = d.pdus.Run(context.WithoutCancel(r.Context()))
+		}
+	}()
 	err := h.edus.Execute(ctx, origin, d.steps)
+	<-pduDone
 	cancel()
+	if pending != nil {
+		pending.Commit()
+	}
 
 	if err != nil {
 		var fe *edu.ForwardError
@@ -261,6 +312,22 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, body []byte, txn
 	}
 
 	ans := answer{status: http.StatusOK, body: []byte(`{"pdus":{}}`)}
+	if len(pduResults) > 0 {
+		b, err := canonicaljson.Marshal(map[string]any{"pdus": pduResults})
+		if err != nil {
+			h.log.Error().Err(err).Msg("Could not encode a transaction answer")
+		} else {
+			ans.body = b
+		}
+	}
+	if h.responses != nil {
+		// set_response: a retry is answered the same, by any process.
+		sctx, scancel := context.WithTimeout(context.WithoutCancel(r.Context()), 10*time.Second)
+		if err := h.responses.SetTxnResponse(sctx, origin, txnID, ans.status, ans.body); err != nil {
+			h.log.Warn().Err(err).Str("origin", origin).Msg("Could not store a transaction answer")
+		}
+		scancel()
+	}
 	h.coord.end(origin, f, &ans)
 	h.write(w, ans, routeNative, "ok", rec)
 }
@@ -299,6 +366,8 @@ type decision struct {
 	stored *store.StoredResponse
 	// steps is the EDU plan otherwise.
 	steps []edu.Step
+	// pdus is write mode's plan for the PDUs, if any.
+	pdus PDURun
 }
 
 // stateFunc reads a transaction's state; see TxnStore.
@@ -309,9 +378,12 @@ type stateFunc func(ctx context.Context, origin, txnID string) (store.TxnState, 
 // native mode would do; shadow mode also supplies state read before Synapse
 // saw the request.
 func (h *Handler) decide(ctx context.Context, origin, txnID string, body []byte, applyCanary bool, state stateFunc) decision {
-	edus, reason := classify(body)
+	edus, pdus, reason := classify(body)
 	if reason != "" {
 		return decision{proxyReason: reason}
+	}
+	if len(pdus) > 0 && (!applyCanary || h.pduServer == nil || !h.pduSelected(origin)) {
+		return decision{proxyReason: reasonHasPDUs}
 	}
 	if applyCanary && h.mode.Kind == config.ModeCanary && !canarySelected(origin, h.mode.CanaryPercent) {
 		return decision{proxyReason: reasonCanary}
@@ -342,7 +414,26 @@ func (h *Handler) decide(ctx context.Context, origin, txnID string, body []byte,
 		}
 		return decision{proxyReason: reasonUncertain}
 	}
-	return decision{steps: steps}
+	d := decision{steps: steps}
+	if len(pdus) > 0 {
+		run, why := h.pduServer.PlanPDUs(ctx, origin, pdus, time.Now())
+		if why != "" {
+			return decision{proxyReason: why}
+		}
+		d.pdus = run
+	}
+	return d
+}
+
+// pduSelected says write mode serves the origin's PDUs.
+func (h *Handler) pduSelected(origin string) bool {
+	switch h.pduMode.Kind {
+	case config.ModeNative:
+		return true
+	case config.ModeCanary:
+		return canarySelected(origin, h.pduMode.CanaryPercent)
+	}
+	return false
 }
 
 // canarySelected picks a stable subset of origins. Selecting by origin rather

@@ -71,7 +71,7 @@ Everything else goes through Synapse's replication endpoints:
 | 3 | Write role with exactly the tables above | **done** (`dbrole` writes, `inbound.Grants`); not yet created at startup |
 | 4 | Staging, room lock, purge read lock, interoperable with Python | **done** (`internal/inbound`: Synapse's SQL, tested on a throwaway PostgreSQL) |
 | 5 | Room queue processor and the one-minute sweep | **done** (`inbound.Processor`); a deferred event stays staged, with its room, for Synapse's sweep |
-| 6 | `/send` answer per PDU, and `received_transactions` | todo |
+| 6 | `/send` answer per PDU, and `received_transactions` | **done** (`inbound.FrontDoor`, `txn`); a transaction whose PDUs we cannot answer exactly (unknown keys, bad signatures, redaction on receipt) is Synapse's |
 | 7 | The writes: state groups, push staging, `fed_send_events`, unstage | **done**; a failed persist is left staged for Synapse, where Synapse would log it and drop the event |
 | 8 | Missing prevs and state: `/get_missing_events`, `/state_ids`, `/event`, outliers, failed pull attempts | todo |
 | 9 | Side effects: device resync, guest kicks (`allow_guest_access: false` here, so kicks should find no guests) | todo |
@@ -82,8 +82,9 @@ Everything else goes through Synapse's replication endpoints:
 
 ## Rollout
 
-`modes.pdu` gains `canary:N` (per origin, as for EDUs: a canary origin's
-whole transaction is Go's) and `native`. Rooms are safe to share with the
+`modes.pdu` takes `canary:N` (per origin, as for EDUs: a canary origin's
+whole transaction is Go's) and `native`, with `write.instance_name`. The
+shadow keeps checking every PDU, ours included. Rooms are safe to share with the
 Python worker throughout: both stage into the same table and take the same
 lock, so a room is only ever processed by one process at a time, and
 whichever holds the lock processes everything staged in it.
