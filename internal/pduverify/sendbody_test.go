@@ -47,12 +47,6 @@ func TestPDUEventDict(t *testing.T) {
 	}
 }
 
-func jsonEqual(a, b any) bool {
-	x, _ := json.Marshal(a)
-	y, _ := json.Marshal(b)
-	return string(x) == string(y)
-}
-
 // The body as the persister parses it: context deltas as Python tuples.
 func TestSendEntryEncoding(t *testing.T) {
 	e := sendEntry{

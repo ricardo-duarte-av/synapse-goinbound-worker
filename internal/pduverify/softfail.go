@@ -60,10 +60,15 @@ func (s *Verifier) SoftFail(ctx context.Context, id string, snap *pdustore.Snaps
 		return res.fail(OutcomeSkipped, "race")
 	}
 
-	stored, err := s.st.SoftFailed(ctx, id)
+	meta, err := s.st.InternalMetadata(ctx, id)
 	if err != nil {
 		return res.fail(OutcomeError, err.Error())
 	}
+	if _, ok := meta["policy_server_spammy"]; ok {
+		// Soft-failed on receipt, by the policy check.
+		return res.fail(OutcomeSkipped, "policy server soft-failed it")
+	}
+	stored, _ := meta["soft_failed"].(bool)
 	res.SynapseRej = stored // reused: Synapse's soft-fail verdict
 
 	ours, why, err := s.softFailed(ctx, ev, snap)

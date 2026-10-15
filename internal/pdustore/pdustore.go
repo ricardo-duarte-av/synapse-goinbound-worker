@@ -691,3 +691,32 @@ func (s *Store) InternalMetadata(ctx context.Context, id string) (map[string]any
 	}
 	return m, nil
 }
+
+const qCurrentStateEvent = `
+	SELECT c.event_id, ej.json,
+	       EXISTS (SELECT 1 FROM redactions r WHERE r.redacts = c.event_id)
+	FROM current_state_events c
+	JOIN event_json ej USING (event_id)
+	WHERE c.room_id = $1 AND c.type = $2 AND c.state_key = $3`
+
+// CurrentStateEvent is the room's current state event of a type and state
+// key: get_current_state_event. nil when there is none.
+func (s *Store) CurrentStateEvent(ctx context.Context, roomID, typ, stateKey string) (*CurrentEvent, error) {
+	var e CurrentEvent
+	switch err := s.pool.QueryRow(ctx, qCurrentStateEvent, roomID, typ, stateKey).Scan(&e.EventID, &e.JSON, &e.Redacted); {
+	case errors.Is(err, pgx.ErrNoRows):
+		return nil, nil
+	case err != nil:
+		return nil, fmt.Errorf("pdustore: current state event: %w", err)
+	}
+	return &e, nil
+}
+
+// CurrentEvent is a current state event as stored.
+type CurrentEvent struct {
+	EventID string
+	JSON    []byte
+	// Redacted: a redaction of it is stored, so Synapse may read it
+	// pruned (whether it does depends on the redaction's validity).
+	Redacted bool
+}

@@ -146,6 +146,10 @@ type SendInput struct {
 	// Replay, StateGroups and SoftFail are those checks' results; each
 	// must have matched.
 	Replay, StateGroups, SoftFail *Result
+	// PolicySigned is the policy server Synapse asked, and got a
+	// signature from: write mode adds the one it is given, which the
+	// check takes from Synapse's copy.
+	PolicySigned string
 }
 
 // SendBody builds the fed_send_events entry write mode would send for the
@@ -261,6 +265,15 @@ func (s *Verifier) buildSendEntry(ctx context.Context, in SendInput) (sendEntry,
 	if err != nil {
 		return sendEntry{}, "event_from_pdu_json: " + err.Error(), nil
 	}
+	if in.PolicySigned != "" {
+		sigs, _ := evDict["signatures"].(map[string]any)
+		var stored map[string]any
+		d := json.NewDecoder(bytes.NewReader([]byte(gjson.GetBytes(ev.JSON, "signatures").Get(gjson.Escape(in.PolicySigned)).Raw)))
+		d.UseNumber()
+		if sigs != nil && d.Decode(&stored) == nil {
+			sigs[in.PolicySigned] = stored
+		}
+	}
 
 	meta := map[string]any{}
 	if in.SoftFail.OurRej {
@@ -327,6 +340,14 @@ func (s *Verifier) buildSendEntry(ctx context.Context, in SendInput) (sendEntry,
 			StateDeltaDueToEvent:  encodeStateDict(dueToEvent),
 		},
 	}, "", nil
+}
+
+// jsonEqual compares decoded JSON values by their encoding (map keys are
+// sorted).
+func jsonEqual(a, b any) bool {
+	x, _ := json.Marshal(a)
+	y, _ := json.Marshal(b)
+	return string(x) == string(y)
 }
 
 // popAgeTS removes unsigned.age_ts, returning it.

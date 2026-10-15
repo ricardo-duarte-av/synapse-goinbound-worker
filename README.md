@@ -298,10 +298,20 @@ own verdicts, and compares it with what Synapse persisted:
 - the context's groups, from the state group check's plan, with
   `state_group_deltas` as `_build_state_group_deltas` orders them.
 
-It runs only when state_groups and soft_fail matched. A PDU whose content
-hash fails is `redacted on receipt` (Synapse sends its pruned copy), and one
-a room's policy server soft-failed is skipped: policy servers are not
-asked. `pdusweep -send` runs it on history, rebuilding each PDU as received
+It runs only when state_groups, soft_fail and policy matched. A PDU whose
+content hash fails is `redacted on receipt` (Synapse sends its pruned copy).
+
+The `policy` check covers room policy servers (MSC4284; 75 rooms here).
+On receipt, before staging, Synapse lets a PDU through on the policy
+server's `ed25519:policy_server` signature, checked with the key in the
+room's `m.room.policy` (or unstable) event; otherwise it asks the policy
+server to sign it (`/_matrix/policy/v1/sign`). A signature it gets is added
+to the event before it is persisted; a refusal soft-fails it as
+`policy_server_spammy`. The shadow decides on arrival which Synapse will
+do, from the room's current state (`no policy server`, `policy event`,
+`signed`, `Synapse asks`), and reads what it did from the stored copy:
+`asked, signed` or `asked, refused`. It does not ask the policy server
+itself. `send_body` then expects the signature Synapse was given. `pdusweep -send` runs it on history, rebuilding each PDU as received
 from the stored JSON. On 2026-10-15, 625 events across v3-v12, forks
 included: every remote one matched; the rest are `local event`.
 

@@ -911,24 +911,7 @@ func userIDIsValid(s string) bool {
 	if !userIDParses(s) {
 		return false
 	}
-	domain := s[1:][strings.IndexByte(s[1:], ':')+1:]
-	host := domain
-	if !strings.HasSuffix(domain, "]") {
-		if i := strings.LastIndexByte(domain, ':'); i >= 0 {
-			host = domain[:i]
-			if _, err := pyIntString(domain[i+1:]); err != nil {
-				return false
-			}
-		}
-	}
-	if strings.HasPrefix(host, "[") {
-		if !strings.HasSuffix(host, "]") || len(host) < 3 {
-			return false
-		}
-		a, err := netip.ParseAddr(host[1 : len(host)-1])
-		return err == nil && a.Is6()
-	}
-	return validHost.MatchString(host)
+	return ValidServerName(s[1:][strings.IndexByte(s[1:], ':')+1:])
 }
 
 // Get is Python's obj.get(key) over event content: None (a zero Result) when
@@ -1105,4 +1088,26 @@ func ed25519Verify(key, message, sig []byte) bool {
 // outside the auth rules: push evaluation reads the sender's level with it.
 func UserPowerLevel(userID string, auth AuthState) (int64, error) {
 	return getUserPowerLevel(userID, auth)
+}
+
+// ValidServerName is parse_and_validate_server_name succeeding
+// (util/stringutils.py:143).
+func ValidServerName(name string) bool {
+	host := name
+	if !strings.HasSuffix(name, "]") {
+		if i := strings.LastIndexByte(name, ':'); i >= 0 {
+			host = name[:i]
+			if _, err := pyIntString(name[i+1:]); err != nil {
+				return false
+			}
+		}
+	}
+	if strings.HasPrefix(host, "[") {
+		if !strings.HasSuffix(host, "]") || len(host) < 3 {
+			return false
+		}
+		a, err := netip.ParseAddr(host[1 : len(host)-1])
+		return err == nil && a.Is6()
+	}
+	return validHost.MatchString(host)
 }

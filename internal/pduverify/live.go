@@ -49,6 +49,7 @@ type job struct {
 	skip     string // a reason not to check, if any
 	agree    string // a reason we and Synapse both ignore the PDU, if any
 	fail     string // an error preparing, if any
+	policy   PolicyVerdict
 }
 
 // LiveOptions tunes the shadow.
@@ -236,6 +237,11 @@ func (l *Live) prepare(j *job) {
 			return
 		}
 	}
+	// Synapse consults the room's policy server on receipt, against its
+	// current state, before staging the PDU.
+	if j.policy, err = l.v.Policy(ctx, j.raw, ev, l.server); err != nil {
+		j.policy = PolicyVerdict{Skip: "policy lookup"}
+	}
 	types, err := pdu.AuthTypesForEvent(rv, ev)
 	if err != nil {
 		return
@@ -377,7 +383,10 @@ func (l *Live) check(j *job) {
 		held := j.snap != nil && j.snap.PrevsInTimeline && !j.snap.EventPresent
 		return l.v.StateGroups(ctx, replayed, held)
 	}
-	var groups, soft *Result
+	var groups, soft, policy *Result
+	policyCheck := func(ctx context.Context, id string) *Result {
+		return l.v.CheckPolicy(ctx, id, j.raw, j.policy)
+	}
 	sendBody := func(ctx context.Context, id string) *Result {
 		if replayed == nil {
 			return &Result{EventID: id, Outcome: OutcomeSkipped, Reason: "state_auth did not match"}
@@ -385,7 +394,14 @@ func (l *Live) check(j *job) {
 		if j.snap != nil && j.snap.PartialState {
 			return &Result{EventID: id, Outcome: OutcomeSkipped, Reason: "partial state room"}
 		}
-		return l.v.SendBody(ctx, SendInput{Raw: j.raw, Received: j.received, Replay: replayed, StateGroups: groups, SoftFail: soft})
+		in := SendInput{Raw: j.raw, Received: j.received, Replay: replayed, StateGroups: groups, SoftFail: soft}
+		switch {
+		case policy == nil || policy.Outcome != OutcomeMatch:
+			return &Result{EventID: id, Outcome: OutcomeSkipped, Reason: "policy did not match"}
+		case policy.Reason == "asked, signed":
+			in.PolicySigned = j.policy.Server
+		}
+		return l.v.SendBody(ctx, in)
 	}
 	pushCheck := func(ctx context.Context, id string) *Result {
 		if j.snap == nil {
@@ -397,7 +413,7 @@ func (l *Live) check(j *job) {
 	for _, c := range []struct {
 		name string
 		run  func(context.Context, string) *Result
-	}{{"signatures", l.v.CheckSigs}, {"state_auth", replay}, {"state_groups", stateGroups}, {"soft_fail", softFail}, {"send_body", sendBody}, {"push", pushCheck}} {
+	}{{"signatures", l.v.CheckSigs}, {"policy", policyCheck}, {"state_auth", replay}, {"state_groups", stateGroups}, {"soft_fail", softFail}, {"send_body", sendBody}, {"push", pushCheck}} {
 		res := c.run(ctx, eventID)
 		res.EventID = eventID
 		switch c.name {
@@ -405,6 +421,8 @@ func (l *Live) check(j *job) {
 			groups = res
 		case "soft_fail":
 			soft = res
+		case "policy":
+			policy = res
 		}
 		l.recordResult(c.name, res)
 		ev := log.Debug()
@@ -510,6 +528,8 @@ func reasonLabel(outcome, reason string) string {
 		"no snapshot", "soft fail",
 		"state_groups did not match", "soft_fail did not match", "no hashes", "redacted on receipt",
 		"event_from_pdu_json", "policy server soft-failed it", "send body", "local event",
+		"no policy server", "policy event", "signed", "asked, signed", "asked, refused", "Synapse asks",
+		"policy event redacted", "policy server host not looked up", "policy lookup", "policy did not match", "policy",
 		"push not configured", "invite", "min depth", "no state before", "pruned", "redacted", "push",
 		"unparseable", "event id", "content hash", "state resolution", "auth",
 	} {

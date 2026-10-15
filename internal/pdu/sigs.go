@@ -484,3 +484,41 @@ func verifyForServer(server string, signed []byte, validity int64, lookup KeyLoo
 	}
 	return nil
 }
+
+// VerifyWithKey is signedjson's verify_signed_json over the event's redacted
+// form, with one given key rather than the server's published ones: how
+// Synapse checks a policy server's signature (handlers/room_policy.py
+// _verify_policy_server_signature, VerifyJsonRequest.from_event).
+func VerifyWithKey(raw []byte, rv *RoomVersion, server, keyID string, key ed25519.PublicKey) error {
+	redacted, err := Redact(raw, rv)
+	if err != nil {
+		return err
+	}
+	sigs, ok := field(get(gjson.ParseBytes(redacted), "signatures"), server)
+	if !ok || !sigs.IsObject() {
+		return &SignatureError{Msg: "not signed by " + server}
+	}
+	sig, ok := field(sigs, keyID)
+	if !ok || sig.Type != gjson.String {
+		return &SignatureError{Msg: "missing signature " + keyID + " for " + server}
+	}
+	b, err := decodeUnpaddedBase64(sig.Str)
+	if err != nil {
+		return &SignatureError{Msg: "undecodable signature " + keyID}
+	}
+	message, err := without(redacted, "signatures", "unsigned")
+	if err != nil {
+		return err
+	}
+	canon, err := Canonical(message)
+	if err != nil {
+		return err
+	}
+	if len(key) != ed25519.PublicKeySize || !ed25519.Verify(key, canon, b) {
+		return &SignatureError{Msg: "invalid signature " + keyID + " for " + server}
+	}
+	return nil
+}
+
+// DecodeBase64 is unpaddedbase64.decode_base64.
+func DecodeBase64(s string) ([]byte, error) { return decodeUnpaddedBase64(s) }

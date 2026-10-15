@@ -143,6 +143,13 @@ things that are not derivable from the code.
 - **Matrix HQ's missing prevs store full groups**: ~13.6k rows each, 364
   in one day (2026-10-14). Synapse's missing-prevs path passes the
   fetched state as `state_ids_before_event`, which never becomes a delta.
+- **Policy servers decide soft-fail on receipt** (MSC4284, 75 rooms here,
+  2026-10-15). An event without a valid `ed25519:policy_server` signature
+  makes Synapse ask the policy server, inside the `/send` request, with a
+  30s timeout. Write mode must ask too: without it, spam Synapse soft-fails
+  gets through. The stored copy shows what happened (an added signature,
+  or `policy_server_spammy`), so the shadow can check without asking.
+
 - **homeserver.yaml has duplicate keys** (`msc3814_enabled` twice).
   PyYAML keeps the last one; yaml.v3 refuses the whole file, so
   `experimental_features` is decoded by hand (`lastWins`).
