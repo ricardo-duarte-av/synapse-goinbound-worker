@@ -89,8 +89,14 @@ func (f *FrontDoor) PlanPDUs(ctx context.Context, origin string, pdus []json.Raw
 			// UnsupportedRoomVersionError: ignored.
 			continue
 		}
-		// event_from_pdu_json: anything we would parse differently from
-		// Synapse makes the transaction Synapse's.
+		// event_from_pdu_json: what it rejects is ignored; anything we
+		// would parse differently from Synapse makes the transaction
+		// Synapse's.
+		if err := pdu.CheckPDUJSON(raw, rv); errors.Is(err, pdu.ErrIgnoredPDU) {
+			continue
+		} else if err != nil {
+			return nil, "pdu_unparseable"
+		}
 		id := gjson.GetBytes(raw, "event_id").Str
 		if rv.EventFormat != pdu.FormatV1V2 {
 			if id, err = pdu.CalculateEventID(raw, rv); err != nil {

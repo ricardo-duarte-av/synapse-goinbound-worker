@@ -16,6 +16,8 @@ import (
 	"maunium.net/go/mautrix/federation"
 	"maunium.net/go/mautrix/federation/signutil"
 	"maunium.net/go/mautrix/id"
+
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/fedclient"
 )
 
 // rewrite sends every request to the test server, keeping its path.
@@ -68,7 +70,7 @@ func TestSign(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c.fed.HTTP.Transport.(*jsonContentType).next = rewrite{to}
+	c.fed.HTTP.Transport.(*fedclient.JSONContentType).Next = rewrite{to}
 	ctx := context.Background()
 
 	stable = func(w http.ResponseWriter) {

@@ -16,9 +16,10 @@ import (
 	"net/http"
 	"time"
 
-	"go.mau.fi/util/exhttp"
 	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/federation"
+
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/fedclient"
 )
 
 // Timeout is Synapse's: one attempt, no retries (a request with a timeout is
@@ -35,29 +36,11 @@ type Client struct {
 // ("ed25519 <version> <seed>"). allow, when not nil, is
 // federation_domain_whitelist: Synapse refuses any other destination.
 func New(serverName, keyLine string, allow func(string) bool) (*Client, error) {
-	key, err := federation.ParseSynapseKey(keyLine)
+	c, err := fedclient.New(serverName, keyLine, allow, Timeout)
 	if err != nil {
-		return nil, fmt.Errorf("policysign: signing key: %w", err)
+		return nil, fmt.Errorf("policysign: %w", err)
 	}
-	settings := exhttp.SensibleClientSettings
-	settings.GlobalTimeout = Timeout
-	c := federation.NewClient(serverName, key, federation.NewInMemoryCache(), settings)
-	// mautrix sets no Content-Type; Synapse sends application/json, and
-	// some policy servers refuse a body without it (400, then M_FORBIDDEN).
-	c.HTTP.Transport = &jsonContentType{c.HTTP.Transport}
-	c.AllowServer = allow
-	c.UserAgent = "goinbound-worker"
 	return &Client{fed: c}, nil
-}
-
-type jsonContentType struct{ next http.RoundTripper }
-
-func (t *jsonContentType) RoundTrip(req *http.Request) (*http.Response, error) {
-	if req.Body != nil && req.Header.Get("Content-Type") == "" {
-		req = req.Clone(req.Context())
-		req.Header.Set("Content-Type", "application/json")
-	}
-	return t.next.RoundTrip(req)
 }
 
 // Refused is an answer that Synapse takes as the policy server refusing the

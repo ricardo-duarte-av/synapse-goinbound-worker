@@ -467,3 +467,32 @@ func TestStagePushAndTxnResponse(t *testing.T) {
 		t.Errorf("stored %s, want the first answer", body)
 	}
 }
+
+func TestFailedPulls(t *testing.T) {
+	ctx := context.Background()
+	d := testDB(t, "goinbound-test")
+	now := time.UnixMilli(10_000_000)
+	d.now = func() time.Time { return now }
+	c := adminConn(t)
+	if _, err := c.Exec(ctx, `INSERT INTO rooms (room_id, is_public, creator, room_version) VALUES ('!r:x', false, '@a:x', '10') ON CONFLICT DO NOTHING`); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := d.RecordFailedPull(ctx, "!r:x", "$e", "nope"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := d.FailedPulls(ctx, []string{"$e", "$other"})
+	if err != nil || !got["$e"] || got["$other"] {
+		t.Fatalf("failed pulls %v %v", got, err)
+	}
+	// Three attempts: 2^3 hours from the last one.
+	b, _ := d.PullBackoff(ctx, []string{"$e"})
+	if want := now.UnixMilli() + 8*3600*1000; b["$e"] != want {
+		t.Errorf("backoff until %d, want %d", b["$e"], want)
+	}
+	now = now.Add(8 * time.Hour)
+	if b, _ := d.PullBackoff(ctx, []string{"$e"}); len(b) != 0 {
+		t.Errorf("still backing off at the end: %v", b)
+	}
+}
