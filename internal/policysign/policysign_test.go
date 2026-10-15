@@ -36,6 +36,10 @@ func TestSign(t *testing.T) {
 	var unstableHit bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
+		if ct := r.Header.Get("Content-Type"); ct != "application/json" {
+			// Some policy servers refuse the body without it.
+			t.Errorf("Content-Type %q", ct)
+		}
 		xma := federation.ParseXMatrixAuth(r.Header.Get("Authorization"))
 		if xma.Origin != "us.example" || xma.Destination != "policy.example" || xma.KeyID != "ed25519:a_test" {
 			t.Errorf("X-Matrix header %+v", xma)
@@ -64,7 +68,7 @@ func TestSign(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c.fed.HTTP.Transport = rewrite{to}
+	c.fed.HTTP.Transport.(*jsonContentType).next = rewrite{to}
 	ctx := context.Background()
 
 	stable = func(w http.ResponseWriter) {

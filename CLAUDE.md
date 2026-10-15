@@ -172,6 +172,11 @@ things that are not derivable from the code.
   Now one evaluator per room, replaced when the room's ACL event changes,
   and globs are matched directly; `globToRegex` stays as the test oracle.
 
+- **mautrix's federation client sends no Content-Type.** beta2.matrix.org
+  and dommy-mommy.codestorm.net then answer 400 with M_FORBIDDEN, which
+  looks exactly like a spam refusal. `policysign` sets application/json, as
+  Synapse does. Any new request through mautrix needs the same.
+
 - **Never name a metric label `instance` (or `job`).** Prometheus owns those.
   Ours was renamed to `exported_instance` at scrape time, and every "by
   writer" panel silently grouped by the scrape target. The label is `writer`.

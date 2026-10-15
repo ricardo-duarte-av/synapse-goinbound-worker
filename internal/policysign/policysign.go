@@ -42,9 +42,22 @@ func New(serverName, keyLine string, allow func(string) bool) (*Client, error) {
 	settings := exhttp.SensibleClientSettings
 	settings.GlobalTimeout = Timeout
 	c := federation.NewClient(serverName, key, federation.NewInMemoryCache(), settings)
+	// mautrix sets no Content-Type; Synapse sends application/json, and
+	// some policy servers refuse a body without it (400, then M_FORBIDDEN).
+	c.HTTP.Transport = &jsonContentType{c.HTTP.Transport}
 	c.AllowServer = allow
 	c.UserAgent = "goinbound-worker"
 	return &Client{fed: c}, nil
+}
+
+type jsonContentType struct{ next http.RoundTripper }
+
+func (t *jsonContentType) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Body != nil && req.Header.Get("Content-Type") == "" {
+		req = req.Clone(req.Context())
+		req.Header.Set("Content-Type", "application/json")
+	}
+	return t.next.RoundTrip(req)
 }
 
 // Refused is an answer that Synapse takes as the policy server refusing the

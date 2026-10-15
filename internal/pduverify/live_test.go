@@ -122,3 +122,12 @@ func TestRescindsInvite(t *testing.T) {
 		}
 	}
 }
+
+// A label that an earlier one is a prefix of could never be reported.
+func TestReasonLabelsAreReachable(t *testing.T) {
+	for _, l := range reasonLabels {
+		if got := reasonLabel(OutcomeMismatch, l); got != l {
+			t.Errorf("%q is reported as %q", l, got)
+		}
+	}
+}

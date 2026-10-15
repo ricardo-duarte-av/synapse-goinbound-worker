@@ -543,31 +543,36 @@ func reasonLabel(outcome, reason string) string {
 	if outcome == OutcomeMatch && reason == "" {
 		return "ok"
 	}
-	for _, known := range []string{
-		"no room_id", "unknown room", "unsupported room version", "event id not computable", "no event id",
-		"room version lookup", "waiting for persistence", "malformed, not persisted", "too large, not persisted", "not persisted, key unknown",
-		"not persisted", "bad signature, not persisted", "signatures", "still queued by Synapse",
-		"not in room", "not in room, invite rescission", "host joined lookup",
-		"origin denied by server ACL", "server ACL redacted", "server ACL lookup",
-		"state_auth did not match", "no replay", "tie", "resolution cached by Synapse", "group after stored in full",
-		"stored in full: prevs may have been missing", "group before", "group after",
-		"outlier", "create event", "prev event without state group", "a prev's state was computed after the event's",
-		"no state group for the event", "state resolution v1", "signing key not held", "signing key replaced",
-		"rejected", "partial state room", "snapshot taken after the event", "backfilled", "missing prevs", "race",
-		"no snapshot", "soft fail",
-		"state_groups did not match", "soft_fail did not match", "no hashes", "redacted on receipt",
-		"event_from_pdu_json", "policy server soft-failed it", "send body", "local event",
-		"no policy server", "policy event", "signed", "asked, signed", "asked, refused", "Synapse asks",
-		"policy event redacted", "policy server host not looked up", "policy lookup", "policy did not match", "policy",
-		"Synapse did not ask", "both refused", "same signature", "policy answer", "shutting down",
-		"push not configured", "invite", "min depth", "no state before", "pruned", "redacted", "push",
-		"unparseable", "event id", "content hash", "state resolution", "auth",
-	} {
-		if strings.HasPrefix(reason, known) {
-			return known
+	best := "other"
+	for _, known := range reasonLabels {
+		if strings.HasPrefix(reason, known) && (best == "other" || len(known) > len(best)) {
+			best = known
 		}
 	}
-	return "other"
+	return best
+}
+
+// reasonLabels are the bounded labels; a reason is reported as the longest
+// that prefixes it.
+var reasonLabels = []string{
+	"no room_id", "unknown room", "unsupported room version", "event id not computable", "no event id",
+	"room version lookup", "waiting for persistence", "malformed, not persisted", "too large, not persisted", "not persisted, key unknown",
+	"not persisted", "bad signature, not persisted", "signatures", "still queued by Synapse",
+	"not in room", "not in room, invite rescission", "host joined lookup",
+	"origin denied by server ACL", "server ACL redacted", "server ACL lookup",
+	"state_auth did not match", "no replay", "tie", "resolution cached by Synapse", "group after stored in full",
+	"stored in full: prevs may have been missing", "group before", "group after",
+	"outlier", "create event", "prev event without state group", "a prev's state was computed after the event's",
+	"no state group for the event", "state resolution v1", "signing key not held", "signing key replaced",
+	"rejected", "partial state room", "snapshot taken after the event", "backfilled", "missing prevs", "race",
+	"no snapshot", "soft fail",
+	"state_groups did not match", "soft_fail did not match", "no hashes", "redacted on receipt",
+	"event_from_pdu_json", "policy server soft-failed it", "send body", "local event",
+	"no policy server", "policy event", "signed", "asked, signed", "asked, refused", "Synapse asks",
+	"policy event redacted", "policy server host not looked up", "policy lookup", "policy did not match", "policy answer", "policy",
+	"Synapse did not ask", "both refused", "same signature", "shutting down",
+	"push not configured", "invite", "min depth", "no state before", "pruned", "redacted", "push",
+	"unparseable", "event id", "content hash", "state resolution", "auth",
 }
 
 func (l *Live) record(check, outcome, reason string) {
