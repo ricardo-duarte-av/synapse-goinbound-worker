@@ -322,38 +322,95 @@ func (s *Store) StateDelta(ctx context.Context, group int64) (prev int64, hasPre
 	return prev, true, delta, rows.Err()
 }
 
+// qSample samples every room version in one pass over the window, rather
+// than one sorted scan per version. The window is read through the
+// stream_ordering index; anything costlier per event (counting edges for
+// forks) is done afterwards, on the sample only.
 const qSample = `
-	SELECT e.event_id
-	FROM events e
-	JOIN rooms r USING (room_id)
-	LEFT JOIN rejections rej USING (event_id)
-	WHERE e.stream_ordering > (SELECT max(stream_ordering) FROM events) - $3
-	  AND r.room_version = $1
-	  AND NOT e.outlier
-	  AND e.type <> 'm.room.create'
-	  AND (NOT $4 OR (SELECT count(*) FROM event_edges ed WHERE ed.event_id = e.event_id) >= 2)
-	  AND (NOT $5 OR e.rejection_reason IS NOT NULL OR rej.reason IS NOT NULL)
-	ORDER BY random()
-	LIMIT $2`
+	SELECT room_version, event_id FROM (
+		SELECT r.room_version, e.event_id,
+		       row_number() OVER (PARTITION BY r.room_version ORDER BY random()) AS n
+		FROM events e
+		JOIN rooms r USING (room_id)
+		LEFT JOIN rejections rej USING (event_id)
+		WHERE e.stream_ordering > (SELECT max(stream_ordering) FROM events) - $3
+		  AND r.room_version = ANY($1)
+		  AND NOT e.outlier
+		  AND e.type <> 'm.room.create'
+		  AND (NOT $4 OR e.rejection_reason IS NOT NULL OR rej.reason IS NOT NULL)
+	) s
+	WHERE n <= $2`
 
-// SampleEvents picks up to n random non-outlier events of a room version from
-// the most recent window stream orderings, optionally only those with several
-// prev events (where state resolution runs) or only rejected ones.
-func (s *Store) SampleEvents(ctx context.Context, roomVersion string, n int, window int64, forks, rejected bool) ([]string, error) {
-	rows, err := s.pool.Query(ctx, qSample, roomVersion, n, window, forks, rejected)
+const qForks = `
+	SELECT event_id FROM event_edges
+	WHERE event_id = ANY($1)
+	GROUP BY event_id HAVING count(*) >= 2`
+
+// forkOversample is how many events are sampled per fork wanted: about one
+// event in twenty has several prevs.
+const forkOversample = 40
+
+// SampleEvents picks up to n random non-outlier events of each room version
+// from the most recent window stream orderings, optionally only those with
+// several prev events (where state resolution runs) or only rejected ones.
+func (s *Store) SampleEvents(ctx context.Context, roomVersions []string, n int, window int64, forks, rejected bool) (map[string][]string, error) {
+	want := n
+	if forks {
+		want = n * forkOversample
+	}
+	rows, err := s.pool.Query(ctx, qSample, roomVersions, want, window, rejected)
 	if err != nil {
 		return nil, fmt.Errorf("pdustore: sample: %w", err)
 	}
-	defer rows.Close()
-	var out []string
+	out := map[string][]string{}
+	var all []string
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		var v, id string
+		if err := rows.Scan(&v, &id); err != nil {
+			rows.Close()
 			return nil, err
 		}
-		out = append(out, id)
+		out[v] = append(out[v], id)
+		all = append(all, id)
 	}
-	return out, rows.Err()
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("pdustore: sample: %w", err)
+	}
+	if !forks {
+		return out, nil
+	}
+
+	isFork := map[string]bool{}
+	for start := 0; start < len(all); start += 1000 {
+		end := min(start+1000, len(all))
+		frows, err := s.pool.Query(ctx, qForks, all[start:end])
+		if err != nil {
+			return nil, fmt.Errorf("pdustore: sample forks: %w", err)
+		}
+		for frows.Next() {
+			var id string
+			if err := frows.Scan(&id); err != nil {
+				frows.Close()
+				return nil, err
+			}
+			isFork[id] = true
+		}
+		frows.Close()
+		if err := frows.Err(); err != nil {
+			return nil, fmt.Errorf("pdustore: sample forks: %w", err)
+		}
+	}
+	for v, ids := range out {
+		var kept []string
+		for _, id := range ids {
+			if isFork[id] && len(kept) < n {
+				kept = append(kept, id)
+			}
+		}
+		out[v] = kept
+	}
+	return out, nil
 }
 
 const qVerifyKeys = `
@@ -620,4 +677,17 @@ func (s *Store) SoftFailed(ctx context.Context, id string) (bool, error) {
 	}
 	_ = json.Unmarshal([]byte(meta), &m)
 	return m.SoftFailed, nil
+}
+
+// InternalMetadata is the event's stored internal metadata, decoded.
+func (s *Store) InternalMetadata(ctx context.Context, id string) (map[string]any, error) {
+	var meta string
+	if err := s.pool.QueryRow(ctx, qInternalMetadata, id).Scan(&meta); err != nil {
+		return nil, fmt.Errorf("pdustore: internal metadata: %w", err)
+	}
+	m := map[string]any{}
+	if err := json.Unmarshal([]byte(meta), &m); err != nil {
+		return nil, fmt.Errorf("pdustore: internal metadata: %w", err)
+	}
+	return m, nil
 }

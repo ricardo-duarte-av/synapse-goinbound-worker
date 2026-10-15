@@ -377,6 +377,16 @@ func (l *Live) check(j *job) {
 		held := j.snap != nil && j.snap.PrevsInTimeline && !j.snap.EventPresent
 		return l.v.StateGroups(ctx, replayed, held)
 	}
+	var groups, soft *Result
+	sendBody := func(ctx context.Context, id string) *Result {
+		if replayed == nil {
+			return &Result{EventID: id, Outcome: OutcomeSkipped, Reason: "state_auth did not match"}
+		}
+		if j.snap != nil && j.snap.PartialState {
+			return &Result{EventID: id, Outcome: OutcomeSkipped, Reason: "partial state room"}
+		}
+		return l.v.SendBody(ctx, SendInput{Raw: j.raw, Received: j.received, Replay: replayed, StateGroups: groups, SoftFail: soft})
+	}
 	pushCheck := func(ctx context.Context, id string) *Result {
 		if j.snap == nil {
 			return &Result{EventID: id, Outcome: OutcomeSkipped, Reason: "no snapshot"}
@@ -387,9 +397,15 @@ func (l *Live) check(j *job) {
 	for _, c := range []struct {
 		name string
 		run  func(context.Context, string) *Result
-	}{{"signatures", l.v.CheckSigs}, {"state_auth", replay}, {"state_groups", stateGroups}, {"soft_fail", softFail}, {"push", pushCheck}} {
+	}{{"signatures", l.v.CheckSigs}, {"state_auth", replay}, {"state_groups", stateGroups}, {"soft_fail", softFail}, {"send_body", sendBody}, {"push", pushCheck}} {
 		res := c.run(ctx, eventID)
 		res.EventID = eventID
+		switch c.name {
+		case "state_groups":
+			groups = res
+		case "soft_fail":
+			soft = res
+		}
 		l.recordResult(c.name, res)
 		ev := log.Debug()
 		if res.Outcome == OutcomeMismatch {
@@ -492,6 +508,8 @@ func reasonLabel(outcome, reason string) string {
 		"no state group for the event", "state resolution v1", "signing key not held", "signing key replaced",
 		"rejected", "partial state room", "snapshot taken after the event", "backfilled", "missing prevs", "race",
 		"no snapshot", "soft fail",
+		"state_groups did not match", "soft_fail did not match", "no hashes", "redacted on receipt",
+		"event_from_pdu_json", "policy server soft-failed it", "send body", "local event",
 		"push not configured", "invite", "min depth", "no state before", "pruned", "redacted", "push",
 		"unparseable", "event id", "content hash", "state resolution", "auth",
 	} {

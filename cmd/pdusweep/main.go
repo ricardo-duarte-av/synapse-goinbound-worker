@@ -38,13 +38,14 @@ import (
 )
 
 func main() {
-	dsn := flag.String("dsn", "host=/var/sockets user=synapse dbname=synapse-db", "Synapse database")
-	n := flag.Int("n", 100, "events to sample per room version")
+	dsn := flag.String("dsn", "host=/var/sockets user=goinbound_ro dbname=synapse-db", "Synapse database (the read-only role, whose statement timeout bounds every query)")
+	n := flag.Int("n", 50, "events to sample per room version")
 	versions := flag.String("versions", "2,3,4,5,6,7,8,9,10,11,12", "room versions to sample")
 	forks := flag.Bool("forks", false, "only events with two or more prev_events, where state resolution runs")
 	rejected := flag.Bool("rejected", false, "only events Synapse rejected")
-	window := flag.Int64("window", 2_000_000, "sample from the most recent N stream orderings")
-	workers := flag.Int("workers", 4, "events replayed concurrently")
+	window := flag.Int64("window", 200_000, "sample from the most recent N stream orderings")
+	workers := flag.Int("workers", 1, "events replayed concurrently")
+	rate := flag.Float64("rate", 5, "events replayed per second at most, across workers (0: no limit)")
 	out := flag.String("out", "", "write one JSON line per mismatch or error to this file")
 	event := flag.String("event", "", "replay this one event and print everything, with a state resolution trace")
 	walk := flag.Bool("walk", false, "compute auth chain differences by walking the DAG instead of the chain cover index")
@@ -53,11 +54,12 @@ func main() {
 	sigs := flag.Bool("sigs", false, "check event IDs, content hashes and signatures instead of auth and state")
 	pushFlag := flag.Bool("push", false, "check push actions against event_push_actions instead of auth and state (recent events: rows are pruned after a day or so)")
 	groupsFlag := flag.Bool("groups", false, "check the shape of the state groups Synapse stored (reused, or built on which group with which delta) instead of auth and state")
+	sendFlag := flag.Bool("send", false, "build the fed_send_events entry write mode would send and compare it with what Synapse persisted, instead of auth and state")
 	homeserver := flag.String("homeserver", "/opt/matrix/synapse/synapse/homeserver.yaml", "homeserver.yaml, for -push")
 	flag.Parse()
 
 	ctx := context.Background()
-	st, err := pdustore.Open(ctx, *dsn, int32(*workers*2))
+	st, err := pdustore.Open(ctx, *dsn, int32(*workers+1))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -80,6 +82,23 @@ func main() {
 				return r
 			}
 			return sw.StateGroups(ctx, r, false)
+		}
+	}
+	if *sendFlag {
+		check = func(ctx context.Context, id string) *pduverify.Result {
+			r := sw.Replay(ctx, id)
+			if r.Outcome != pduverify.OutcomeMatch {
+				return r
+			}
+			g := sw.StateGroups(ctx, r, false)
+			if g.Outcome != pduverify.OutcomeMatch {
+				return g
+			}
+			in, err := sw.SweepSendInput(ctx, r, g)
+			if err != nil {
+				return &pduverify.Result{EventID: id, Outcome: pduverify.OutcomeError, Reason: err.Error()}
+			}
+			return sw.SendBody(ctx, in)
 		}
 	}
 	if *pushFlag {
@@ -130,7 +149,7 @@ func main() {
 		}
 		ids := strings.Fields(string(b))
 		start := time.Now()
-		results := replayAll(ctx, check, ids, *workers)
+		results := replayAll(ctx, check, ids, *workers, *rate)
 		report("ids", results, time.Since(start))
 		if sink != nil {
 			for _, r := range results {
@@ -142,15 +161,19 @@ func main() {
 		return
 	}
 
+	var vs []string
 	for _, v := range strings.Split(*versions, ",") {
-		v = strings.TrimSpace(v)
-		ids, err := sample(ctx, st, v, *n, *window, *forks, *rejected)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "v%s: sample: %v\n", v, err)
-			continue
-		}
+		vs = append(vs, strings.TrimSpace(v))
+	}
+	sampled, err := st.SampleEvents(ctx, vs, *n, *window, *forks, *rejected)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "sample: %v\n", err)
+		os.Exit(1)
+	}
+	for _, v := range vs {
+		ids := sampled[v]
 		start := time.Now()
-		results := replayAll(ctx, check, ids, *workers)
+		results := replayAll(ctx, check, ids, *workers, *rate)
 		report(v, results, time.Since(start))
 		if sink != nil {
 			for _, r := range results {
@@ -162,9 +185,15 @@ func main() {
 	}
 }
 
-func replayAll(ctx context.Context, check func(context.Context, string) *pduverify.Result, ids []string, workers int) []*pduverify.Result {
+func replayAll(ctx context.Context, check func(context.Context, string) *pduverify.Result, ids []string, workers int, rate float64) []*pduverify.Result {
 	out := make([]*pduverify.Result, len(ids))
 	jobs := make(chan int)
+	var tick <-chan time.Time
+	if rate > 0 {
+		t := time.NewTicker(time.Duration(float64(time.Second) / rate))
+		defer t.Stop()
+		tick = t.C
+	}
 	var wg sync.WaitGroup
 	for w := 0; w < workers; w++ {
 		wg.Add(1)
@@ -176,15 +205,14 @@ func replayAll(ctx context.Context, check func(context.Context, string) *pduveri
 		}()
 	}
 	for i := range ids {
+		if tick != nil && i > 0 {
+			<-tick
+		}
 		jobs <- i
 	}
 	close(jobs)
 	wg.Wait()
 	return out
-}
-
-func sample(ctx context.Context, st *pdustore.Store, version string, n int, window int64, forks, rejected bool) ([]string, error) {
-	return st.SampleEvents(ctx, version, n, window, forks, rejected)
 }
 
 func report(version string, results []*pduverify.Result, took time.Duration) {

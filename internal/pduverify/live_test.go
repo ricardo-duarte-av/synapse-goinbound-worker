@@ -34,11 +34,11 @@ func TestLiveOnStoredEvents(t *testing.T) {
 	defer st.Close()
 
 	var pdus []json.RawMessage
-	for _, v := range []string{"5", "10", "11", "12"} {
-		ids, err := st.SampleEvents(ctx, v, 5, 200000, false, false)
-		if err != nil {
-			t.Fatal(err)
-		}
+	sampled, err := st.SampleEvents(ctx, []string{"5", "10", "11", "12"}, 5, 200000, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ids := range sampled {
 		got, _, err := st.GetStoredEvents(ctx, ids)
 		if err != nil {
 			t.Fatal(err)

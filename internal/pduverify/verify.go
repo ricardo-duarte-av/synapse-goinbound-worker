@@ -53,6 +53,8 @@ type Result struct {
 	before pdu.StateMap
 	// replay is what the state group check needs from Replay.
 	replay *replayed
+	// plan is the state group check's plan, for the send_body check.
+	plan *groupPlan
 }
 
 // replayed is Replay's working, kept for the state group check.

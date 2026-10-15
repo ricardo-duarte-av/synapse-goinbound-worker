@@ -32,6 +32,10 @@ type Event struct {
 	Room     *RoomVersion
 	// JSON is the stored event JSON.
 	JSON []byte
+	// RecheckRedaction is set by event auth, as Synapse sets the internal
+	// metadata flag of the same name: a redaction whose sender may only
+	// redact their own events, in a room version that checks that later.
+	RecheckRedaction bool
 }
 
 // ErrMalformed is an event Synapse would not have accepted in this shape,

@@ -699,6 +699,7 @@ func checkRedaction(rv *RoomVersion, ev *Event, auth AuthState) error {
 	}
 	if rv.EventFormat != FormatV1V2 {
 		// Rechecked when the redaction is applied.
+		ev.RecheckRedaction = true
 		return nil
 	}
 	redacter, err := domainOf(ev.ID)

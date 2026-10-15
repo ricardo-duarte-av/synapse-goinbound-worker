@@ -228,7 +228,7 @@ func (s *Verifier) StateGroups(ctx context.Context, r *Result, prevsHeld bool) *
 	}
 
 	plan := planOrdered(rp.groups, rp.sets, r.before)
-	res.GroupPlan = plan.String()
+	res.GroupPlan, res.plan = plan.String(), &plan
 	mismatch := func(reason, why string) *Result {
 		if plan.tie {
 			return res.fail(OutcomeSkipped, "tie")

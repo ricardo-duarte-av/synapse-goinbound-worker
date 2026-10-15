@@ -207,6 +207,10 @@ compared with what Synapse stored. Counted in `goinbound_pdu_shadow_total`
 3. compares the verdict with Synapse's rejection record, and the resulting
    state with the state group Synapse stored.
 
+It is light by default: the read-only role (so its statement timeout
+bounds every query), one worker, 5 events a second (`-rate`), 50 events per
+room version from the last 200k stream orderings, sampled in one pass.
+
 ```sh
 go run ./cmd/pdusweep -n 100 -forks      # events where state resolution runs
 go run ./cmd/pdusweep -n 100 -rejected   # events Synapse rejected
@@ -281,6 +285,25 @@ reuse or delta was possible is the missing-prevs path, state from a
 remote's `/state_ids`; the live check counts it as a mismatch only when its
 snapshot saw every prev in the timeline. `pdusweep -groups` runs it on
 history.
+
+The `send_body` check builds the `fed_send_events` entry write mode would
+hand the persister (`_serialize_payload`, `EventContext.serialize`) from our
+own verdicts, and compares it with what Synapse persisted:
+
+- the event, after `event_from_pdu_json` (unsigned stripped to its
+  whitelist, `age` turned into `age_ts` at the request time) and
+  `replaces_state`, against `event_json`;
+- `internal_metadata`: `soft_failed` from our soft-fail verdict,
+  `recheck_redaction` from event auth;
+- the context's groups, from the state group check's plan, with
+  `state_group_deltas` as `_build_state_group_deltas` orders them.
+
+It runs only when state_groups and soft_fail matched. A PDU whose content
+hash fails is `redacted on receipt` (Synapse sends its pruned copy), and one
+a room's policy server soft-failed is skipped: policy servers are not
+asked. `pdusweep -send` runs it on history, rebuilding each PDU as received
+from the stored JSON. On 2026-10-15, 625 events across v3-v12, forks
+included: every remote one matched; the rest are `local event`.
 
 Push actions are checked last. The shadow reproduces
 `BulkPushRuleEvaluator._action_for_event_by_user` against each user's push
