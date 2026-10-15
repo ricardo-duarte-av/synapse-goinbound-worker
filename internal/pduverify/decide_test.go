@@ -2,8 +2,11 @@ package pduverify
 
 import (
 	"testing"
+	"time"
 
 	"github.com/tidwall/gjson"
+
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pdu"
 )
 
 func TestDeviceResyncNeeded(t *testing.T) {
@@ -32,5 +35,35 @@ func TestDeviceResyncNeeded(t *testing.T) {
 		if got := deviceResyncNeeded(gjson.Parse(c.content), cached); got != c.want {
 			t.Errorf("%s: %v, want %v", c.content, got, c.want)
 		}
+	}
+}
+
+func TestStateCache(t *testing.T) {
+	c := NewStateCache()
+	now := time.Unix(1000, 0)
+	c.now = func() time.Time { return now }
+	e := NewEntry(0, 5, pdu.StateMap{{Type: "x"}: "$x"}, nil)
+	c.put([]int64{9, 7}, e)
+	// The key is the set of groups, in any order.
+	if got := c.get([]int64{7, 9}); got != e {
+		t.Fatal("entry not found by the same groups")
+	}
+	// Storing the group is seen by every later hit.
+	e.SetGroup(42)
+	if c.get([]int64{9, 7}).Group() != 42 {
+		t.Error("group not shared")
+	}
+	c.DropUngrouped([]int64{7, 9})
+	if c.get([]int64{7, 9}) == nil {
+		t.Error("a grouped entry was dropped")
+	}
+	c.put([]int64{1, 2}, NewEntry(0, 0, nil, pdu.StateMap{}))
+	c.DropUngrouped([]int64{2, 1})
+	if c.get([]int64{1, 2}) != nil {
+		t.Error("an ungrouped entry was kept")
+	}
+	now = now.Add(61 * time.Minute)
+	if c.get([]int64{7, 9}) != nil {
+		t.Error("an entry outlived its hour")
 	}
 }

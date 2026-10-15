@@ -68,11 +68,12 @@ func (e *StateEntry) DropPrev() {
 // of state groups resolved, an hour each, at most 100,000. It is per
 // process in Synapse too; ours is a process of its own.
 type StateCache struct {
-	mu  sync.Mutex
-	m   map[string]stateCacheItem
-	ttl time.Duration
-	max int
-	now func() time.Time
+	mu   sync.Mutex
+	puts int
+	m    map[string]stateCacheItem
+	ttl  time.Duration
+	max  int
+	now  func() time.Time
 }
 
 type stateCacheItem struct {
@@ -105,12 +106,15 @@ func (c *StateCache) put(groups []int64, e *StateEntry) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := c.now()
-	if len(c.m) >= c.max {
+	c.puts++
+	if c.puts%1000 == 0 || len(c.m) >= c.max {
 		for k, it := range c.m {
 			if now.Sub(it.at) > c.ttl {
 				delete(c.m, k)
 			}
 		}
+	}
+	if len(c.m) >= c.max {
 		for k := range c.m {
 			if len(c.m) < c.max {
 				break
