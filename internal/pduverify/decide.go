@@ -121,6 +121,18 @@ func (c *StateCache) put(groups []int64, e *StateEntry) {
 	c.m[cacheKey(groups)] = stateCacheItem{e: e, at: now}
 }
 
+// DropUngrouped drops the entry for groups if no group was ever stored for
+// it: the shadow's, when Synapse's group is unknown, so a full state map is
+// not kept for an hour.
+func (c *StateCache) DropUngrouped(groups []int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	k := cacheKey(groups)
+	if it, ok := c.m[k]; ok && it.e.Group() == 0 {
+		delete(c.m, k)
+	}
+}
+
 // Pop drops the entry for groups: resolve_state_groups does when a cached
 // entry points at a deleted group.
 func (c *StateCache) Pop(groups []int64) {

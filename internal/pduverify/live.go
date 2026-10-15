@@ -488,7 +488,11 @@ func (l *Live) check(j *job) {
 				staged = signed
 			}
 		}
-		return l.v.CheckDecision(ctx, id, j.decision, j.snap, staged)
+		r := l.v.CheckDecision(ctx, id, j.decision, j.snap, staged)
+		if j.decision != nil && len(j.decision.Groups) > 1 {
+			l.cache.DropUngrouped(j.decision.Groups)
+		}
+		return r
 	}
 	pushCheck := func(ctx context.Context, id string) *Result {
 		if j.snap == nil {
