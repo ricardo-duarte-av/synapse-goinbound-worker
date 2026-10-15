@@ -127,6 +127,9 @@ decision and the plan.
 Prometheus job: `av-goinbound-worker-1:9200`. The Grafana dashboard is in
 `deploy/grafana/` (import `goinbound-worker.json`).
 
+The same listener serves Go's profiles at `/debug/pprof/`, e.g.
+`go tool pprof http://<container IP>:9200/debug/pprof/heap`.
+
 ## Verifying each step
 
 ```promql
