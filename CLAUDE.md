@@ -27,7 +27,8 @@ things that are not derivable from the code.
 - **Whatever a persister or writer can persist, it persists.** Writes go over
   replication (`fed_send_events`, `fed_send_edu`). Only what Synapse's own
   inbound worker writes directly (staging, `worker_locks`, state groups,
-  `event_push_actions_staging`, `event_failed_pull_attempts`) may be written
+  `event_push_actions_staging`, `event_failed_pull_attempts`, the
+  `destinations` reset and its `caches` stream row) may be written
   by us, from write mode only, through a role granted exactly those tables.
 - **Until write mode: no writes to Synapse's data.** `TestEveryQueryIsASelect` enforces it.
   A write, even to `received_transactions` or `destinations`, skips the caches
@@ -46,16 +47,21 @@ things that are not derivable from the code.
   sent only as a SCRAM verifier. Nothing to store, and the same on every start.
   On PostgreSQL 16+ only a superuser may name SUPERUSER attributes in
   ALTER ROLE, so `Ensure` sets only LOGIN.
-- **An origin in backoff is reset by Synapse, at our request.** Synapse resets
-  `destinations` and streams a cache invalidation plus `REMOTE_SERVER_UP` on
-  every signed request from such an origin (`transport/server/_base.py:143`).
-  gofederation depends on that broadcast. Never write `destinations` or the
-  caches stream from here: being a caches-stream writer pins its position in
-  every process (gofederation's `state.SetRetryTimings`). `origin_up` calls
-  the admin API's `reset_connection` on main instead, which is the very same
-  `reset_retry_timings`. On main it doesn't publish `REMOTE_SERVER_UP` (main has
-  no replication client there), so we publish it, as a plain command. Without
-  `origin_up`, those transactions are proxied.
+- **An origin in backoff is reset by us, as the inbound worker does.** Synapse
+  resets `destinations`, streams a cache invalidation, and publishes
+  `REMOTE_SERVER_UP` on every signed request from such an origin
+  (`transport/server/_base.py:143`). gofederation depends on that broadcast.
+  `write.mark_origins_up` does all three: the upsert, a `caches` stream row
+  under `write.instance_name`, its RDATA, then REMOTE_SERVER_UP, and a
+  POSITION in answer to REPLICATE. Being a caches-stream writer is normal:
+  every Synapse process is one (`writers=[]`), and Synapse says a quiet one
+  holds nothing back (`resource.py`: "nothing cares if a given worker's
+  caches stream position lags"). gofederation's warning against it was too
+  broad. Two rules: publish RDATA in stream ID order (a process drops a token
+  at or below the last it saw from an instance), and announce an RDATA that
+  failed with a POSITION, so processes read the row from the database. Our
+  lines round-trip byte-identical through Synapse's own parsers (checked
+  2026-10-15). Without the setting, those transactions are proxied.
 - **Shadow mode reads transaction state BEFORE proxying.** It runs
   concurrently, with the header's claimed origin. Read afterwards, every
   transaction looks like a retry, because Synapse has just written
@@ -205,6 +211,11 @@ things that are not derivable from the code.
   The tests create the write role from `inbound.Grants` and run as it, so a
   missing grant fails there. `worker_read_write_locks`' triggers run as the
   caller, which is why `worker_read_write_locks_mode` is granted too.
+
+- **The replication bus test uses a throwaway Redis**, never `/var/sockets/keydb`:
+  `docker run -d --rm --name goinbound-testredis -p 127.0.0.1:56379:6379 redis:7-alpine`,
+  then `ORIGINUP_TEST_REDIS=127.0.0.1:56379 go test ./internal/originup/`.
+  A stray RDATA on the live bus would invalidate caches in every process.
 
 - `TestLiveEnsure` (dbrole) does DDL on the real database: it creates and
   drops a throwaway role. The auto-mode classifier blocks it, so the operator

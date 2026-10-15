@@ -35,11 +35,15 @@ var Grants = []dbrole.Grant{
 	{Table: "event_failed_pull_attempts", Privileges: "SELECT, INSERT, UPDATE, DELETE"},
 	// mark_remote_users_device_caches_as_stale, before a device resync.
 	{Table: "device_lists_remote_resync", Privileges: "SELECT, INSERT"},
+	// reset_retry_timings, for an origin in backoff that sent us a
+	// transaction, and the invalidation it streams.
+	{Table: "destinations", Privileges: "SELECT, INSERT, UPDATE (failure_ts, retry_last_ts, retry_interval)"},
+	{Table: "cache_invalidation_stream_by_instance", Privileges: "INSERT"},
 }
 
-// Sequences are granted USAGE: new state group IDs, and the pending
-// deletion bump's sequence_number = DEFAULT.
-var Sequences = []string{"state_group_id_seq", "state_groups_pending_deletion_sequence_number_seq"}
+// Sequences are granted USAGE: new state group IDs, the pending deletion
+// bump's sequence_number = DEFAULT, and caches stream IDs.
+var Sequences = []string{"state_group_id_seq", "state_groups_pending_deletion_sequence_number_seq", "cache_invalidation_stream_seq"}
 
 // DB is the write connection.
 type DB struct {

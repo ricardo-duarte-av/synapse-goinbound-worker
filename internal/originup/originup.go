@@ -1,106 +1,99 @@
-// Package originup does what Synapse does when a server we had backed off
-// sends us a signed request: it marks the server as up
+// Package originup does what Synapse's inbound worker does when a server we
+// had backed off sends us a signed request: it marks the server as up
 // (Authenticator.reset_retry_timings, transport/server/_base.py:143).
 //
-// Synapse's worker does three things, in order:
+// That is, in order:
 //
-//  1. set_destination_retry_timings(origin, None, 0, 0): an upsert into
-//     destinations plus an invalidation of get_destination_retry_timings,
-//     streamed to every process on the caches stream;
-//  2. notify_remote_server_up in its own process;
-//  3. REMOTE_SERVER_UP on the replication bus, so every other process
-//     (the federation sender above all) wakes the destination.
+//  1. set_destination_retry_timings(origin, None, 0, 0): the destinations
+//     upsert, plus a row on the caches stream invalidating every process's
+//     get_destination_retry_timings for the origin, under the worker's own
+//     instance name (_invalidate_cache_and_stream);
+//  2. the caches stream's RDATA for that row on the replication bus, which
+//     is how every other process learns of it;
+//  3. REMOTE_SERVER_UP, so every process (the federation sender above all)
+//     wakes the destination.
 //
-// The first is done by Synapse itself: the admin API's reset_connection
-// (rest/admin/federation.py) calls the very same reset_retry_timings on main.
-// Writing destinations from here would leave every process's cached timings
-// stale, and streaming the invalidation would make us a writer of the caches
-// stream, whose persisted position then waits on us (see gofederation's
-// state.SetRetryTimings). On main, reset_retry_timings does steps 1 and 2 but
-// not 3 (main has no replication client there), so the command is published
-// here, exactly as a worker publishes it.
+// Every Synapse process writes the caches stream, the inbound worker
+// included: its MultiWriterIdGenerator has writers=[], and a writer that
+// then goes quiet holds nothing back ("nothing cares if a given worker's
+// caches stream position lags", replication/tcp/resource.py).
 package originup
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
-	"net"
-	"net/http"
-	"net/url"
-	"strings"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/rs/zerolog"
+
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/inbound"
 )
 
 var resets = promauto.NewCounterVec(prometheus.CounterOpts{
 	Name: "goinbound_origin_up_total",
-	Help: "Origins in backoff marked as up, by outcome: reset (Synapse reset it and REMOTE_SERVER_UP was published), already_up (someone else reset it first), error, publish_error.",
+	Help: "Origins in backoff marked as up, by outcome: reset, db_error, publish_error.",
 }, []string{"outcome"})
 
-// Publisher publishes one replication command line on a channel.
+// Store writes the reset (inbound.DB).
+type Store interface {
+	ResetDestination(ctx context.Context, origin string) (inbound.CacheInvalidation, error)
+}
+
+// Publisher publishes one replication command line on the bus.
 type Publisher interface {
-	Publish(ctx context.Context, channel, line string) error
+	Publish(ctx context.Context, line string) error
 }
 
 // Options builds a Resetter.
 type Options struct {
-	// AdminAPI is main's client listener: a unix socket path, or a base URL.
-	AdminAPI string
-	// AccessToken is an admin user's access token.
-	AccessToken string
-	// Channel is the replication channel, Synapse's server_name.
-	Channel   string
+	Store     Store
 	Publisher Publisher
-	Log       zerolog.Logger
+	// Instance is our instance name on the caches stream.
+	Instance string
+	Log      zerolog.Logger
 }
 
 // Resetter marks origins as up.
 type Resetter struct {
-	base    string
-	http    *http.Client
-	token   string
-	channel string
-	pub     Publisher
-	log     zerolog.Logger
-	now     func() time.Time
+	store    Store
+	pub      Publisher
+	instance string
+	log      zerolog.Logger
+	now      func() time.Time
+	// retryDelay is between publish attempts; shortened in tests.
+	retryDelay time.Duration
 
 	mu       sync.Mutex
 	inflight map[string]bool
 	failedAt time.Time
+
+	// bus serialises resets: a process drops RDATA at or below the last
+	// token it saw from an instance, so ours go out in stream ID order.
+	bus sync.Mutex
+	// last is the last caches stream ID we wrote; unannounced says its
+	// RDATA may not have reached the bus.
+	last        int64
+	unannounced bool
 }
 
 // failureHold is how long after a failed reset Ready says no, so that while
-// Synapse's worker exists, the transactions go to it and it resets the
-// origin instead.
+// Synapse's worker exists, the transactions go to it instead.
 const failureHold = 5 * time.Minute
 
-// requestTimeout bounds one admin call and one publish.
-const requestTimeout = 30 * time.Second
+const (
+	publishAttempts = 3
+	stepTimeout     = 10 * time.Second
+)
 
 // New builds a Resetter.
 func New(o Options) *Resetter {
-	base := strings.TrimRight(o.AdminAPI, "/")
-	client := &http.Client{Timeout: requestTimeout}
-	if strings.HasPrefix(o.AdminAPI, "/") {
-		sock := o.AdminAPI
-		var d net.Dialer
-		client.Transport = &http.Transport{
-			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				return d.DialContext(ctx, "unix", sock)
-			},
-		}
-		base = "http://main"
-	}
-	return &Resetter{base: base, http: client, token: o.AccessToken, channel: o.Channel,
-		pub: o.Publisher, log: o.Log, now: time.Now, inflight: map[string]bool{}}
+	return &Resetter{store: o.Store, pub: o.Publisher, instance: o.Instance, log: o.Log,
+		now: time.Now, retryDelay: time.Second, inflight: map[string]bool{}}
 }
 
 // Ready says whether origins in backoff can be served here: false for a
@@ -129,9 +122,7 @@ func (r *Resetter) Reset(origin string) {
 			delete(r.inflight, origin)
 			r.mu.Unlock()
 		}()
-		ctx, cancel := context.WithTimeout(context.Background(), 2*requestTimeout)
-		defer cancel()
-		outcome, err := r.reset(ctx, origin)
+		outcome, err := r.reset(origin)
 		resets.WithLabelValues(outcome).Inc()
 		if err != nil {
 			r.mu.Lock()
@@ -140,93 +131,90 @@ func (r *Resetter) Reset(origin string) {
 			r.log.Warn().Err(err).Str("origin", origin).Str("outcome", outcome).Msg("Could not mark an origin as up")
 			return
 		}
-		r.log.Info().Str("origin", origin).Str("outcome", outcome).Msg("Marked origin as up")
+		r.log.Info().Str("origin", origin).Msg("Marked origin as up")
 	}()
 }
 
-func (r *Resetter) reset(ctx context.Context, origin string) (string, error) {
-	status, errcode, err := r.adminReset(ctx, origin)
+func (r *Resetter) reset(origin string) (string, error) {
+	r.bus.Lock()
+	defer r.bus.Unlock()
+
+	if r.unannounced {
+		// A POSITION makes every process read the rows it missed from the
+		// database (_process_position).
+		if err := r.publish(r.positionLine()); err != nil {
+			return "publish_error", err
+		}
+		r.unannounced = false
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), stepTimeout)
+	inv, err := r.store.ResetDestination(ctx, origin)
+	cancel()
 	if err != nil {
-		return "error", err
+		return "db_error", err
 	}
-	switch {
-	case status == http.StatusOK:
-	case status == http.StatusBadRequest && errcode == "M_UNKNOWN":
-		// "The retry timing does not need to be reset for this
-		// destination": reset since we read it, by whoever reset it, and
-		// that process told everyone.
-		return "already_up", nil
-	default:
-		return "error", fmt.Errorf("originup: reset_connection answered %d %s", status, errcode)
+	r.last, r.unannounced = inv.StreamID, true
+
+	line, err := rdataLine(inv)
+	if err != nil {
+		return "publish_error", err
 	}
-	if err := r.pub.Publish(ctx, r.channel, "REMOTE_SERVER_UP "+origin); err != nil {
-		return "publish_error", fmt.Errorf("originup: publishing REMOTE_SERVER_UP: %w", err)
+	if err := r.publish(line); err != nil {
+		return "publish_error", err
+	}
+	r.unannounced = false
+	if err := r.publish("REMOTE_SERVER_UP " + origin); err != nil {
+		return "publish_error", err
 	}
 	return "reset", nil
 }
 
-func (r *Resetter) adminReset(ctx context.Context, origin string) (int, string, error) {
-	u := r.base + "/_synapse/admin/v1/federation/destinations/" + url.PathEscape(origin) + "/reset_connection"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader([]byte("{}")))
-	if err != nil {
-		return 0, "", err
+func (r *Resetter) publish(line string) error {
+	var err error
+	for i := range publishAttempts {
+		if i > 0 {
+			time.Sleep(r.retryDelay)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), stepTimeout)
+		err = r.pub.Publish(ctx, line)
+		cancel()
+		if err == nil {
+			return nil
+		}
 	}
-	req.Header.Set("Authorization", "Bearer "+r.token)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := r.http.Do(req)
-	if err != nil {
-		return 0, "", err
-	}
-	defer resp.Body.Close()
-	return resp.StatusCode, errcodeOf(resp.Body), nil
+	return fmt.Errorf("originup: publishing %.40q: %w", line, err)
 }
 
-// Check confirms at startup that the token is an admin's, so a wrong one is
-// found before the first origin in backoff instead of at it.
-func (r *Resetter) Check(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
-	defer cancel()
-	var who struct {
-		UserID string `json:"user_id"`
+// OnReplicate answers a REPLICATE as every writer does, with its position on
+// each stream it writes, so a process that just connected catches up on
+// rows it missed. Nothing is said before our first write.
+func (r *Resetter) OnReplicate() {
+	r.bus.Lock()
+	defer r.bus.Unlock()
+	if r.last == 0 {
+		return
 	}
-	if err := r.getJSON(ctx, "/_matrix/client/v3/account/whoami", &who); err != nil {
-		return err
+	if err := r.publish(r.positionLine()); err != nil {
+		r.log.Warn().Err(err).Msg("Could not answer REPLICATE with our caches position")
+		return
 	}
-	var admin struct {
-		Admin bool `json:"admin"`
-	}
-	if err := r.getJSON(ctx, "/_synapse/admin/v1/users/"+url.PathEscape(who.UserID)+"/admin", &admin); err != nil {
-		return err
-	}
-	if !admin.Admin {
-		return fmt.Errorf("originup: %s is not a server admin", who.UserID)
-	}
-	return nil
+	r.unannounced = false
 }
 
-func (r *Resetter) getJSON(ctx context.Context, path string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.base+path, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+r.token)
-	resp, err := r.http.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("originup: GET %s answered %d %s", path, resp.StatusCode, errcodeOf(resp.Body))
-	}
-	return json.NewDecoder(io.LimitReader(resp.Body, 1<<16)).Decode(out)
+// positionLine is POSITION with prev_token = new_token = our last ID, as an
+// instance announces itself (commands.py PositionCommand).
+func (r *Resetter) positionLine() string {
+	id := strconv.FormatInt(r.last, 10)
+	return "POSITION caches " + r.instance + " " + id + " " + id
 }
 
-func errcodeOf(body io.Reader) string {
-	var e struct {
-		Errcode string `json:"errcode"`
+// rdataLine is the caches stream's RDATA for inv: the row is
+// CachesStreamRow(cache_func, keys, invalidation_ts) as a JSON list.
+func rdataLine(inv inbound.CacheInvalidation) (string, error) {
+	row, err := json.Marshal([]any{inv.CacheFunc, inv.Keys, inv.InvalidationTS})
+	if err != nil {
+		return "", err
 	}
-	if err := json.NewDecoder(io.LimitReader(body, 1<<16)).Decode(&e); err != nil && !errors.Is(err, io.EOF) {
-		return ""
-	}
-	return e.Errcode
+	return "RDATA caches " + inv.Instance + " " + strconv.FormatInt(inv.StreamID, 10) + " " + string(row), nil
 }

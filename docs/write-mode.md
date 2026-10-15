@@ -88,9 +88,10 @@ Everything else goes through Synapse's replication endpoints:
 - Partial state rooms are deferred: one here (`!cURbafjkfsMDVwdRDQ:matrix.org`), with
   no traffic. Under `native` its events would stay staged.
 - Guest-access changes are deferred (Synapse kicks local guests; there are none).
-- Origins in backoff: served with `origin_up` (Synapse's `reset_connection`,
-  then `REMOTE_SERVER_UP`). Signed requests to endpoints other than `/send`
-  still reach the Python worker, which resets them itself.
+- Origins in backoff: served with `write.mark_origins_up` (the reset, its
+  `caches` stream row and RDATA, then `REMOTE_SERVER_UP`). Signed requests to
+  endpoints other than `/send` still reach the Python worker, which resets
+  them itself.
 
 ## Rollout
 

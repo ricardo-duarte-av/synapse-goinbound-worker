@@ -45,14 +45,13 @@ Everything below is read from Synapse's source and cited in the code:
 - **A failed forward fails the transaction with a 500**, so that the sender
   retries. That matters because to-device messages must be delivered reliably.
 - **The backoff reset Synapse does on every signed request**
-  (`transport/server/_base.py:143`), when `origin_up` is set. Synapse's own
-  admin API (`reset_connection`, on main) runs the same `reset_retry_timings`:
-  the `destinations` write, and the cache invalidation streamed to every
-  process. Then we publish `REMOTE_SERVER_UP` on the replication bus, which
-  main's copy of the reset does not. Without `origin_up`, or for five minutes
-  after a reset fails, a transaction from an origin with a non-zero
-  `destinations.retry_last_ts` is proxied and Synapse's worker does it. That is
-  ~0.4% of transactions here.
+  (`transport/server/_base.py:143`), with `write.mark_origins_up`, as the
+  inbound worker does it: the `destinations` reset; a `caches` stream row
+  invalidating `get_destination_retry_timings` under our `instance_name`; its
+  `RDATA` on the replication bus; then `REMOTE_SERVER_UP`. Without it, or for
+  five minutes after a reset fails, a transaction from an origin with a
+  non-zero `destinations.retry_last_ts` is proxied and Synapse's worker does
+  it. That is ~0.4% of transactions here.
 
 ## Modes
 

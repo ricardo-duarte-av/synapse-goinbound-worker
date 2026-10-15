@@ -3,29 +3,54 @@ package originup
 import (
 	"context"
 	"errors"
-	"io"
-	"net/http"
-	"net/http/httptest"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/rs/zerolog"
+
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/inbound"
 )
+
+type fakeStore struct {
+	mu   sync.Mutex
+	next int64
+	err  error
+	gate chan struct{}
+	seen []string
+}
+
+func (s *fakeStore) ResetDestination(_ context.Context, origin string) (inbound.CacheInvalidation, error) {
+	if s.gate != nil {
+		<-s.gate
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err != nil {
+		return inbound.CacheInvalidation{}, s.err
+	}
+	s.next++
+	s.seen = append(s.seen, origin)
+	return inbound.CacheInvalidation{StreamID: 100 + s.next, Instance: "goinbound-worker",
+		CacheFunc: inbound.CacheRetryTimings, Keys: []string{origin}, InvalidationTS: 1700000000000}, nil
+}
 
 type fakePub struct {
 	mu    sync.Mutex
 	lines []string
-	err   error
+	// fail fails publishes whose line starts with it.
+	fail string
 }
 
-func (p *fakePub) Publish(_ context.Context, channel, line string) error {
+func (p *fakePub) Publish(_ context.Context, line string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.err != nil {
-		return p.err
+	if p.fail != "" && strings.HasPrefix(line, p.fail) {
+		return errors.New("bus down")
 	}
-	p.lines = append(p.lines, channel+": "+line)
+	p.lines = append(p.lines, line)
 	return nil
 }
 
@@ -35,65 +60,10 @@ func (p *fakePub) list() []string {
 	return append([]string(nil), p.lines...)
 }
 
-// fakeMain stands in for Synapse's main process. status is reset_connection's
-// answer; gate, when set, holds every reset until closed.
-type fakeMain struct {
-	mu     sync.Mutex
-	paths  []string
-	status int
-	body   string
-	admin  bool
-	gate   chan struct{}
-}
-
-func (m *fakeMain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	m.mu.Lock()
-	gate := m.gate
-	m.mu.Unlock()
-	if r.Header.Get("Authorization") != "Bearer tok" {
-		w.WriteHeader(401)
-		_, _ = io.WriteString(w, `{"errcode":"M_UNKNOWN_TOKEN"}`)
-		return
-	}
-	switch r.URL.Path {
-	case "/_matrix/client/v3/account/whoami":
-		_, _ = io.WriteString(w, `{"user_id":"@admin:hs"}`)
-		return
-	case "/_synapse/admin/v1/users/@admin:hs/admin":
-		if m.admin {
-			_, _ = io.WriteString(w, `{"admin":true}`)
-		} else {
-			_, _ = io.WriteString(w, `{"admin":false}`)
-		}
-		return
-	}
-	if gate != nil {
-		<-gate
-	}
-	m.mu.Lock()
-	m.paths = append(m.paths, r.Method+" "+r.URL.EscapedPath())
-	status, body := m.status, m.body
-	m.mu.Unlock()
-	if status == 0 {
-		status = 200
-	}
-	if body == "" {
-		body = `{}`
-	}
-	w.WriteHeader(status)
-	_, _ = io.WriteString(w, body)
-}
-
-func (m *fakeMain) calls() []string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return append([]string(nil), m.paths...)
-}
-
-func setup(t *testing.T, m *fakeMain, pub *fakePub, token string) *Resetter {
-	srv := httptest.NewServer(m)
-	t.Cleanup(srv.Close)
-	return New(Options{AdminAPI: srv.URL, AccessToken: token, Channel: "hs", Publisher: pub, Log: zerolog.Nop()})
+func setup(s *fakeStore, p *fakePub) *Resetter {
+	r := New(Options{Store: s, Publisher: p, Instance: "goinbound-worker", Log: zerolog.Nop()})
+	r.retryDelay = time.Millisecond
+	return r
 }
 
 func waitFor(t *testing.T, cond func() bool) {
@@ -103,87 +73,122 @@ func waitFor(t *testing.T, cond func() bool) {
 		if time.Now().After(deadline) {
 			t.Fatal("timed out")
 		}
-		time.Sleep(5 * time.Millisecond)
+		time.Sleep(2 * time.Millisecond)
 	}
 }
 
-func TestResetCallsSynapseThenPublishes(t *testing.T) {
-	m, pub := &fakeMain{}, &fakePub{}
-	r := setup(t, m, pub, "tok")
+// The reset, then its row on the caches stream, then REMOTE_SERVER_UP, in
+// Synapse's wire format.
+func TestResetPublishesInvalidationThenServerUp(t *testing.T) {
+	s, p := &fakeStore{}, &fakePub{}
+	r := setup(s, p)
 	r.Reset("down.example")
-	waitFor(t, func() bool { return len(pub.list()) == 1 })
-	if got := m.calls(); len(got) != 1 || got[0] != "POST /_synapse/admin/v1/federation/destinations/down.example/reset_connection" {
-		t.Errorf("admin calls = %v", got)
+	waitFor(t, func() bool { return len(p.list()) == 2 })
+	want := []string{
+		`RDATA caches goinbound-worker 101 ["get_destination_retry_timings",["down.example"],1700000000000]`,
+		`REMOTE_SERVER_UP down.example`,
 	}
-	if got := pub.list()[0]; got != "hs: REMOTE_SERVER_UP down.example" {
-		t.Errorf("published %q", got)
+	for i, l := range p.list() {
+		if l != want[i] {
+			t.Errorf("line %d = %s\nwant      %s", i, l, want[i])
+		}
 	}
 	if !r.Ready() {
 		t.Error("not ready after a reset that worked")
 	}
 }
 
-// Someone reset it since we read it, and they told everyone.
-func TestAlreadyUpIsNotPublished(t *testing.T) {
-	m := &fakeMain{status: 400, body: `{"errcode":"M_UNKNOWN","error":"The retry timing does not need to be reset for this destination."}`}
-	pub := &fakePub{}
-	r := setup(t, m, pub, "tok")
+func TestDatabaseErrorPublishesNothing(t *testing.T) {
+	s, p := &fakeStore{err: errors.New("db down")}, &fakePub{}
+	r := setup(s, p)
+	now := time.Unix(1000, 0)
+	r.now = func() time.Time { return now }
 	r.Reset("down.example")
-	waitFor(t, func() bool { return len(m.calls()) == 1 })
-	time.Sleep(50 * time.Millisecond)
-	if len(pub.list()) != 0 {
-		t.Errorf("published for an origin already up: %v", pub.list())
+	waitFor(t, func() bool { return !r.Ready() })
+	if len(p.list()) != 0 {
+		t.Errorf("published after a failed reset: %v", p.list())
 	}
+	now = now.Add(failureHold)
 	if !r.Ready() {
-		t.Error("already up counted as a failure")
+		t.Error("still unready after the hold")
 	}
 }
 
-func TestFailureMakesItUnready(t *testing.T) {
-	for name, tc := range map[string]struct {
-		m   *fakeMain
-		pub *fakePub
-	}{
-		"admin api error": {&fakeMain{status: 500}, &fakePub{}},
-		"publish error":   {&fakeMain{}, &fakePub{err: errors.New("redis down")}},
-	} {
-		t.Run(name, func(t *testing.T) {
-			r := setup(t, tc.m, tc.pub, "tok")
-			now := time.Unix(1000, 0)
-			r.now = func() time.Time { return now }
-			r.Reset("down.example")
-			waitFor(t, func() bool { return !r.Ready() })
-			now = now.Add(failureHold)
-			if !r.Ready() {
-				t.Error("still unready after the hold")
-			}
-		})
+// An RDATA that never reached the bus is announced by a POSITION before
+// the next one, so every process reads the row from the database.
+func TestLostRDATAIsAnnouncedByPosition(t *testing.T) {
+	s, p := &fakeStore{}, &fakePub{fail: "RDATA"}
+	r := setup(s, p)
+	r.Reset("a.example")
+	waitFor(t, func() bool { return !r.Ready() })
+	r.mu.Lock()
+	r.failedAt = time.Time{}
+	r.mu.Unlock()
+	waitFor(t, func() bool {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		return !r.inflight["a.example"]
+	})
+
+	p.mu.Lock()
+	p.fail = ""
+	p.mu.Unlock()
+	r.Reset("b.example")
+	waitFor(t, func() bool { return len(p.list()) == 3 })
+	got := p.list()
+	if got[0] != "POSITION caches goinbound-worker 101 101" || !strings.HasPrefix(got[1], "RDATA caches goinbound-worker 102 ") {
+		t.Errorf("published %v", got)
 	}
 }
 
-// A reset already running is not repeated.
+// A REPLICATE is answered with our caches position, once we have one.
+func TestReplicateIsAnsweredWithOurPosition(t *testing.T) {
+	s, p := &fakeStore{}, &fakePub{}
+	r := setup(s, p)
+	r.OnReplicate()
+	if len(p.list()) != 0 {
+		t.Fatalf("announced a position before writing anything: %v", p.list())
+	}
+	r.Reset("down.example")
+	waitFor(t, func() bool { return len(p.list()) == 2 })
+	r.OnReplicate()
+	if got := p.list(); got[2] != "POSITION caches goinbound-worker 101 101" {
+		t.Errorf("answer = %q", got[2])
+	}
+}
+
+// A process drops RDATA at or below the last token it saw from us, so
+// concurrent resets publish in stream ID order.
+func TestConcurrentResetsPublishInOrder(t *testing.T) {
+	s, p := &fakeStore{}, &fakePub{}
+	r := setup(s, p)
+	for i := range 20 {
+		r.Reset("o" + strconv.Itoa(i) + ".example")
+	}
+	waitFor(t, func() bool { return len(p.list()) == 40 })
+	last := int64(0)
+	for _, l := range p.list() {
+		if !strings.HasPrefix(l, "RDATA") {
+			continue
+		}
+		id, _ := strconv.ParseInt(strings.Fields(l)[3], 10, 64)
+		if id <= last {
+			t.Fatalf("RDATA %d after %d", id, last)
+		}
+		last = id
+	}
+}
+
 func TestResetIsNotRepeatedWhileRunning(t *testing.T) {
-	m, pub := &fakeMain{gate: make(chan struct{})}, &fakePub{}
-	r := setup(t, m, pub, "tok")
+	s, p := &fakeStore{gate: make(chan struct{})}, &fakePub{}
+	r := setup(s, p)
 	for range 5 {
 		r.Reset("down.example")
 	}
-	close(m.gate)
-	waitFor(t, func() bool { return len(pub.list()) == 1 })
-	time.Sleep(50 * time.Millisecond)
-	if n := len(m.calls()); n != 1 {
-		t.Errorf("%d admin calls, want 1", n)
-	}
-}
-
-func TestCheck(t *testing.T) {
-	if err := setup(t, &fakeMain{admin: true}, &fakePub{}, "tok").Check(context.Background()); err != nil {
-		t.Errorf("admin token: %v", err)
-	}
-	if err := setup(t, &fakeMain{admin: false}, &fakePub{}, "tok").Check(context.Background()); err == nil {
-		t.Error("a non-admin token passed")
-	}
-	if err := setup(t, &fakeMain{admin: true}, &fakePub{}, "wrong").Check(context.Background()); err == nil {
-		t.Error("a wrong token passed")
+	close(s.gate)
+	waitFor(t, func() bool { return len(p.list()) == 2 })
+	time.Sleep(20 * time.Millisecond)
+	if len(s.seen) != 1 {
+		t.Errorf("%d resets, want 1", len(s.seen))
 	}
 }

@@ -332,17 +332,29 @@ func buildHandler(ctx context.Context, cfg *config.Config, up *proxy.Proxy, log 
 		log.Warn().Str("mode", cfg.Modes.PDU.String()).Str("instance", cfg.Write.InstanceName).Strs("origins", cfg.Write.Origins).
 			Msg("Write mode on: PDUs of the selected origins are persisted here")
 	}
-	var pub *originup.RedisPublisher
-	if cfg.OriginUp.Enabled() {
-		pub, opts.OriginUp = openOriginUp(ctx, cfg, hs, log)
+	var bus *originup.Bus
+	stopBus := func() {}
+	if cfg.Write.MarkOriginsUp {
+		var r *originup.Resetter
+		if bus, r, err = openOriginUp(ctx, cfg, hs, wdb, log); err != nil {
+			proc.Close()
+			wdb.Close()
+			db.Close()
+			return nil, noop, err
+		}
+		var busCtx context.Context
+		busCtx, stopBus = context.WithCancel(context.Background())
+		go bus.Listen(busCtx, r.OnReplicate)
+		opts.OriginUp = r
 	} else {
-		log.Info().Msg("origin_up is not set: transactions from origins in backoff go to Synapse's worker")
+		log.Info().Msg("write.mark_origins_up is off: transactions from origins in backoff go to Synapse's worker")
 	}
 	h := txn.NewHandler(opts)
 	return h, func() {
 		h.Close()
-		if pub != nil {
-			pub.Close()
+		if bus != nil {
+			stopBus()
+			bus.Close()
 		}
 		if proc != nil {
 			proc.Close()
@@ -356,31 +368,22 @@ func buildHandler(ctx context.Context, cfg *config.Config, up *proxy.Proxy, log 
 	}, nil
 }
 
-// openOriginUp builds the resetter for origins in backoff. A token that is
-// not an admin's leaves them to Synapse's worker, loudly, rather than failing
-// every one of them later.
-func openOriginUp(ctx context.Context, cfg *config.Config, hs *synapsecfg.Config, log zerolog.Logger) (*originup.RedisPublisher, txn.OriginUp) {
+// openOriginUp builds the resetter for origins in backoff, on the write
+// role and homeserver.yaml's replication bus.
+func openOriginUp(ctx context.Context, cfg *config.Config, hs *synapsecfg.Config, wdb *inbound.DB, log zerolog.Logger) (*originup.Bus, *originup.Resetter, error) {
 	if !hs.Redis.Enabled {
-		log.Error().Msg("origin_up is set, but homeserver.yaml has no redis: REMOTE_SERVER_UP cannot be sent; origins in backoff go to Synapse's worker")
-		return nil, nil
+		return nil, nil, errors.New("write.mark_origins_up: homeserver.yaml has no redis, so nothing can be told the origin is up")
 	}
-	tok, err := os.ReadFile(cfg.OriginUp.AccessTokenFile)
-	if err != nil {
-		log.Error().Err(err).Msg("origin_up: cannot read the access token; origins in backoff go to Synapse's worker")
-		return nil, nil
+	bus := originup.NewBus(hs.Redis, hs.ServerName, log)
+	pctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := bus.Ping(pctx); err != nil {
+		bus.Close()
+		return nil, nil, fmt.Errorf("write.mark_origins_up: replication bus: %w", err)
 	}
-	pub := originup.NewRedisPublisher(hs.Redis)
-	r := originup.New(originup.Options{
-		AdminAPI: cfg.OriginUp.AdminAPI, AccessToken: strings.TrimSpace(string(tok)),
-		Channel: hs.ServerName, Publisher: pub, Log: log,
-	})
-	if err := r.Check(ctx); err != nil {
-		pub.Close()
-		log.Error().Err(err).Msg("origin_up: the admin API check failed; origins in backoff go to Synapse's worker")
-		return nil, nil
-	}
-	log.Info().Str("admin_api", cfg.OriginUp.AdminAPI).Msg("Origins in backoff are served here and marked as up")
-	return pub, r
+	r := originup.New(originup.Options{Store: wdb, Publisher: bus, Instance: cfg.Write.InstanceName, Log: log})
+	log.Info().Str("instance", cfg.Write.InstanceName).Msg("Origins in backoff are served here and marked as up")
+	return bus, r, nil
 }
 
 // openDatabase connects as the read-only role, making sure first that the role

@@ -202,7 +202,7 @@ func validPrivileges(p string) bool {
 	if strings.TrimSpace(p) == "" {
 		return false
 	}
-	for _, part := range strings.Split(p, ",") {
+	for _, part := range splitPrivileges(p) {
 		name, cols, hasCols := strings.Cut(strings.TrimSpace(part), "(")
 		switch strings.TrimSpace(name) {
 		case "SELECT", "INSERT", "UPDATE", "DELETE":
@@ -217,12 +217,33 @@ func validPrivileges(p string) bool {
 			return false
 		}
 		for _, r := range cols {
-			if !(r == '_' || r == ' ' || r >= 'a' && r <= 'z' || r >= '0' && r <= '9') {
+			if !(r == '_' || r == ' ' || r == ',' || r >= 'a' && r <= 'z' || r >= '0' && r <= '9') {
 				return false
 			}
 		}
 	}
 	return true
+}
+
+// splitPrivileges splits on the commas between privileges, not those in a
+// column list: "SELECT, UPDATE (a, b)" is two.
+func splitPrivileges(p string) []string {
+	var out []string
+	depth, start := 0, 0
+	for i, r := range p {
+		switch r {
+		case '(':
+			depth++
+		case ')':
+			depth--
+		case ',':
+			if depth == 0 {
+				out = append(out, p[start:i])
+				start = i + 1
+			}
+		}
+	}
+	return append(out, p[start:])
 }
 
 // scramVerifier builds the SCRAM-SHA-256 verifier PostgreSQL stores for a
