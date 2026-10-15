@@ -244,6 +244,9 @@ func TestLiveHomeserverYAML(t *testing.T) {
 	if _, ok := cfg.Instance(MainProcessInstanceName); !ok {
 		t.Error("main is not in instance_map; unknown EDU types could not be forwarded")
 	}
+	if !cfg.Redis.Enabled || cfg.Redis.Socket == "" {
+		t.Errorf("redis = enabled %v socket %q; REMOTE_SERVER_UP needs the bus", cfg.Redis.Enabled, cfg.Redis.Socket)
+	}
 }
 
 // Synapse's path is inside its own container; the key is found beside
@@ -295,5 +298,29 @@ func TestEventsWriter(t *testing.T) {
 	}
 	if got := (Writers{}).EventsWriter("!a:b"); got != MainProcessInstanceName {
 		t.Errorf("no writers: %s", got)
+	}
+}
+
+// Synapse's defaults (config/redis.py): a path means a unix socket,
+// otherwise localhost:6379.
+func TestRedis(t *testing.T) {
+	for name, tc := range map[string]struct {
+		yaml string
+		want Redis
+	}{
+		"socket":  {"redis:\n  enabled: true\n  path: /var/sockets/keydb\n", Redis{Enabled: true, Socket: "/var/sockets/keydb"}},
+		"host":    {"redis:\n  enabled: true\n  host: keydb\n  port: \"6380\"\n  dbid: 2\n  password: p\n", Redis{Enabled: true, Addr: "keydb:6380", DBID: 2, Password: "p"}},
+		"default": {"redis:\n  enabled: true\n", Redis{Enabled: true, Addr: "localhost:6379"}},
+		"absent":  {"", Redis{Addr: "localhost:6379"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg, err := parse([]byte("server_name: hs\n"+tc.yaml), "hs.yaml")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Redis != tc.want {
+				t.Errorf("redis = %+v, want %+v", cfg.Redis, tc.want)
+			}
+		})
 	}
 }

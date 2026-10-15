@@ -96,3 +96,12 @@ pdu_shadow:
   # The state group cache, in state entries (~210 bytes each). A big room's
   # state is 150k entries, so this keeps a couple of its latest groups.
   state_cache_entries: 400000
+
+# An origin we had backed off that sends us a transaction is alive: Synapse
+# resets its backoff and tells every process (transport/server/_base.py:143).
+# With this set, that is done by Synapse's admin API on main (the same reset,
+# cache invalidation included), then REMOTE_SERVER_UP is published on the
+# redis of homeserver.yaml. Unset, those transactions are proxied.
+#origin_up:
+#  admin_api: /var/sockets/nginx/av-synapse-main.sock   # main's client listener
+#  access_token_file: /data/admin-token                  # a server admin's token

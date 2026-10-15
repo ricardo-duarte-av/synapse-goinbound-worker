@@ -32,6 +32,7 @@ import (
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/dbrole"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/edu"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/fedauth"
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/originup"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pdustore"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pduverify"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/policysign"
@@ -331,9 +332,18 @@ func buildHandler(ctx context.Context, cfg *config.Config, up *proxy.Proxy, log 
 		log.Warn().Str("mode", cfg.Modes.PDU.String()).Str("instance", cfg.Write.InstanceName).Strs("origins", cfg.Write.Origins).
 			Msg("Write mode on: PDUs of the selected origins are persisted here")
 	}
+	var pub *originup.RedisPublisher
+	if cfg.OriginUp.Enabled() {
+		pub, opts.OriginUp = openOriginUp(ctx, cfg, hs, log)
+	} else {
+		log.Info().Msg("origin_up is not set: transactions from origins in backoff go to Synapse's worker")
+	}
 	h := txn.NewHandler(opts)
 	return h, func() {
 		h.Close()
+		if pub != nil {
+			pub.Close()
+		}
 		if proc != nil {
 			proc.Close()
 			wdb.Close()
@@ -344,6 +354,33 @@ func buildHandler(ctx context.Context, cfg *config.Config, up *proxy.Proxy, log 
 		}
 		db.Close()
 	}, nil
+}
+
+// openOriginUp builds the resetter for origins in backoff. A token that is
+// not an admin's leaves them to Synapse's worker, loudly, rather than failing
+// every one of them later.
+func openOriginUp(ctx context.Context, cfg *config.Config, hs *synapsecfg.Config, log zerolog.Logger) (*originup.RedisPublisher, txn.OriginUp) {
+	if !hs.Redis.Enabled {
+		log.Error().Msg("origin_up is set, but homeserver.yaml has no redis: REMOTE_SERVER_UP cannot be sent; origins in backoff go to Synapse's worker")
+		return nil, nil
+	}
+	tok, err := os.ReadFile(cfg.OriginUp.AccessTokenFile)
+	if err != nil {
+		log.Error().Err(err).Msg("origin_up: cannot read the access token; origins in backoff go to Synapse's worker")
+		return nil, nil
+	}
+	pub := originup.NewRedisPublisher(hs.Redis)
+	r := originup.New(originup.Options{
+		AdminAPI: cfg.OriginUp.AdminAPI, AccessToken: strings.TrimSpace(string(tok)),
+		Channel: hs.ServerName, Publisher: pub, Log: log,
+	})
+	if err := r.Check(ctx); err != nil {
+		pub.Close()
+		log.Error().Err(err).Msg("origin_up: the admin API check failed; origins in backoff go to Synapse's worker")
+		return nil, nil
+	}
+	log.Info().Str("admin_api", cfg.OriginUp.AdminAPI).Msg("Origins in backoff are served here and marked as up")
+	return pub, r
 }
 
 // openDatabase connects as the read-only role, making sure first that the role

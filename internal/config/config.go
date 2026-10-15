@@ -119,6 +119,9 @@ type Config struct {
 	PDUShadow PDUShadow `yaml:"pdu_shadow"`
 	// Write configures write mode (modes.pdu canary:N or native).
 	Write Write `yaml:"write"`
+	// OriginUp lets transactions from an origin in backoff be served here,
+	// marking the origin as up as Synapse does. Unset, they are proxied.
+	OriginUp OriginUp `yaml:"origin_up"`
 
 	// Modes says, per kind of payload, whether it is proxied, shadowed or
 	// served here. Both are required: what goes where is spelled out, never
@@ -395,12 +398,29 @@ func (c *Config) validate() error {
 	if m := c.Write.MissingEvents; m != "" && m != "defer" && m != "fetch" {
 		return fmt.Errorf("write.missing_events is %q; it must be defer or fetch", m)
 	}
+	if (c.OriginUp.AdminAPI == "") != (c.OriginUp.AccessTokenFile == "") {
+		return fmt.Errorf("origin_up: admin_api and access_token_file are both required, or neither")
+	}
 	if c.Modes.PDU.ServesNatively() && c.Write.InstanceName == "" {
 		return fmt.Errorf("modes.pdu is %s, which writes; write.instance_name is required "+
 			"(a name no Synapse process uses, e.g. goinbound-worker)", c.Modes.PDU)
 	}
 	return nil
 }
+
+// OriginUp is how an origin we had backed off is marked as up when it sends
+// us a transaction (transport/server/_base.py:143): Synapse's admin API
+// reset_connection on main, which resets the timings and invalidates every
+// process's cache, then REMOTE_SERVER_UP on the replication bus.
+type OriginUp struct {
+	// AdminAPI is main's client listener: a unix socket path, or a base URL.
+	AdminAPI string `yaml:"admin_api"`
+	// AccessTokenFile holds a server admin's access token.
+	AccessTokenFile string `yaml:"access_token_file"`
+}
+
+// Enabled says origin_up is configured.
+func (o OriginUp) Enabled() bool { return o.AdminAPI != "" }
 
 // Write configures write mode.
 type Write struct {

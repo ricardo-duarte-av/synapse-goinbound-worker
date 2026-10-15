@@ -46,11 +46,16 @@ things that are not derivable from the code.
   sent only as a SCRAM verifier. Nothing to store, and the same on every start.
   On PostgreSQL 16+ only a superuser may name SUPERUSER attributes in
   ALTER ROLE, so `Ensure` sets only LOGIN.
-- **An origin in backoff is proxied, not reset by us.** Synapse resets
+- **An origin in backoff is reset by Synapse, at our request.** Synapse resets
   `destinations` and streams a cache invalidation plus `REMOTE_SERVER_UP` on
   every signed request from such an origin (`transport/server/_base.py:143`).
-  gofederation depends on that broadcast. Doing it from here would need the
-  caches stream, which gofederation's notes explain is worse than not doing it.
+  gofederation depends on that broadcast. Never write `destinations` or the
+  caches stream from here: being a caches-stream writer pins its position in
+  every process (gofederation's `state.SetRetryTimings`). `origin_up` calls
+  the admin API's `reset_connection` on main instead, which is the very same
+  `reset_retry_timings`. On main it doesn't publish `REMOTE_SERVER_UP` (main has
+  no replication client there), so we publish it, as a plain command. Without
+  `origin_up`, those transactions are proxied.
 - **Shadow mode reads transaction state BEFORE proxying.** It runs
   concurrently, with the header's claimed origin. Read afterwards, every
   transaction looks like a retry, because Synapse has just written

@@ -79,6 +79,14 @@ type TxnResponses interface {
 	SetTxnResponse(ctx context.Context, origin, txnID string, code int, canonicalJSON []byte) error
 }
 
+// OriginUp marks origins in backoff as up (originup.Resetter).
+type OriginUp interface {
+	// Ready says whether resets currently work.
+	Ready() bool
+	// Reset marks origin as up, in the background.
+	Reset(origin string)
+}
+
 // EDUs plans and executes a transaction's EDUs.
 type EDUs interface {
 	Plan(ctx context.Context, origin string, edus []edu.EDU) ([]edu.Step, error)
@@ -107,6 +115,9 @@ type Options struct {
 	WriteOrigins []string
 	// Responses, when set, stores every answer given here.
 	Responses TxnResponses
+	// OriginUp, when set, marks an origin in backoff as up, so its
+	// transactions are served here. Nil proxies them.
+	OriginUp OriginUp
 	// DomainWhitelist is federation_domain_whitelist; nil means none.
 	DomainWhitelist map[string]bool
 	MaxBody         int64
@@ -132,6 +143,7 @@ type Handler struct {
 	pduServer      PDUServer
 	writeOrigins   map[string]bool
 	responses      TxnResponses
+	originUp       OriginUp
 	log            zerolog.Logger
 }
 
@@ -156,6 +168,7 @@ func NewHandler(o Options) *Handler {
 		pduServer:      o.PDUServer,
 		writeOrigins:   setOf(o.WriteOrigins),
 		responses:      o.Responses,
+		originUp:       o.OriginUp,
 		log:            o.Log,
 	}
 	if h.mode.Kind == config.ModeShadow || h.mode.Kind == config.ModeCanary {
@@ -279,6 +292,11 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, body []byte, txn
 		h.coord.end(origin, f, nil)
 		return
 	}
+	if d.originDown {
+		// As Synapse: on any signed request, before the transaction, and
+		// without waiting for it.
+		h.originUp.Reset(origin)
+	}
 	if d.stored != nil {
 		ans := answer{status: d.stored.Code, body: d.stored.JSON}
 		h.coord.end(origin, f, &ans)
@@ -383,6 +401,9 @@ type decision struct {
 	steps []edu.Step
 	// pdus is write mode's plan for the PDUs, if any.
 	pdus PDURun
+	// originDown is set when the origin is in backoff, so serving the
+	// transaction means marking it as up.
+	originDown bool
 }
 
 // stateFunc reads a transaction's state; see TxnStore.
@@ -409,16 +430,16 @@ func (h *Handler) decide(ctx context.Context, origin, txnID string, body []byte,
 		h.log.Warn().Err(err).Str("origin", origin).Msg("Could not read transaction state; leaving it to Synapse")
 		return decision{proxyReason: reasonDBError}
 	}
-	if st.RetryLastTS != 0 {
+	down := st.RetryLastTS != 0
+	if down && (h.originUp == nil || !h.originUp.Ready()) {
 		// Synapse resets the backoff of an origin that sends us a signed
 		// request, and tells every worker it is back up
-		// (transport/server/_base.py:143). Only Synapse can do that
-		// correctly -- it is a write plus a cache invalidation streamed to
-		// every instance -- so it gets the request.
+		// (transport/server/_base.py:143). Without origin_up, or while it
+		// is failing, only Synapse's worker can, so it gets the request.
 		return decision{proxyReason: reasonBackoff}
 	}
 	if st.Previous != nil {
-		return decision{stored: st.Previous}
+		return decision{stored: st.Previous, originDown: down}
 	}
 
 	steps, err := h.edus.Plan(ctx, origin, edus)
@@ -429,7 +450,7 @@ func (h *Handler) decide(ctx context.Context, origin, txnID string, body []byte,
 		}
 		return decision{proxyReason: reasonUncertain}
 	}
-	d := decision{steps: steps}
+	d := decision{steps: steps, originDown: down}
 	if len(pdus) > 0 {
 		run, why := h.pduServer.PlanPDUs(ctx, origin, pdus, time.Now())
 		if why != "" {

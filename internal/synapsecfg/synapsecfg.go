@@ -17,6 +17,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"math/big"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -91,6 +92,11 @@ type Config struct {
 	// Database is Synapse's PostgreSQL connection.
 	Database Database
 
+	// Redis is the replication bus, on which commands such as
+	// REMOTE_SERVER_UP are published to the channel named server_name
+	// (replication/tcp/redis.py).
+	Redis Redis
+
 	// Experimental is experimental_features, as given.
 	Experimental map[string]any
 
@@ -154,6 +160,16 @@ type raw struct {
 		ServerName string `yaml:"server_name"`
 	} `yaml:"trusted_key_servers"`
 
+	Redis struct {
+		Enabled  *bool  `yaml:"enabled"`
+		Path     string `yaml:"path"`
+		Host     string `yaml:"host"`
+		Port     any    `yaml:"port"`
+		Username string `yaml:"username"`
+		Password string `yaml:"password"`
+		DBID     any    `yaml:"dbid"`
+	} `yaml:"redis"`
+
 	Database struct {
 		Name string `yaml:"name"`
 		Args struct {
@@ -203,6 +219,10 @@ func parse(b []byte, path string) (*Config, error) {
 		return nil, err
 	}
 
+	if cfg.Redis, err = redisConfig(r); err != nil {
+		return nil, err
+	}
+
 	cfg.TrackPresence = trackPresence(r)
 	cfg.Experimental = lastWins(&r.ExperimentalFeatures)
 
@@ -236,6 +256,45 @@ func parse(b []byte, path string) (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// Redis is how to reach the replication bus.
+type Redis struct {
+	Enabled bool
+	// Socket is redis.path, Addr is host:port. At most one is set.
+	Socket   string
+	Addr     string
+	Username string
+	Password string
+	DBID     int
+}
+
+func redisConfig(r raw) (Redis, error) {
+	out := Redis{
+		Enabled:  r.Redis.Enabled != nil && *r.Redis.Enabled,
+		Socket:   r.Redis.Path,
+		Username: r.Redis.Username,
+		Password: r.Redis.Password,
+	}
+	var err error
+	if out.DBID, err = parseInt(r.Redis.DBID, "redis.dbid"); err != nil {
+		return Redis{}, err
+	}
+	if out.Socket == "" {
+		host := r.Redis.Host
+		if host == "" {
+			host = "localhost"
+		}
+		port, err := parseInt(r.Redis.Port, "redis.port")
+		if err != nil {
+			return Redis{}, err
+		}
+		if port == 0 {
+			port = 6379
+		}
+		out.Addr = net.JoinHostPort(host, strconv.Itoa(port))
+	}
+	return out, nil
 }
 
 // Instance resolves a writer name to its replication address.
