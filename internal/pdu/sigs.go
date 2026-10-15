@@ -351,6 +351,10 @@ type VerifyKey struct {
 // find are simply absent.
 type KeyLookup func(server string, keyIDs []string) (map[string]VerifyKey, error)
 
+// KeyFetch is a KeyLookup that is told how long the keys must be valid, so
+// it can look further (Synapse's Keyring) when what it holds expires sooner.
+type KeyFetch func(server string, keyIDs []string, minValidMS int64) (map[string]VerifyKey, error)
+
 // ErrKeyUnknown means none of a server's signing keys could be found. Synapse
 // would fetch them; not having them is not proof the signature is bad.
 var ErrKeyUnknown = errors.New("pdu: no known key for the signing server")
@@ -370,6 +374,13 @@ func (e *SignatureError) Error() string { return "signature: " + e.Msg }
 // party invite), for v1/v2 by the server that minted its event ID, and for a
 // restricted join by the authorising server.
 func CheckSignatures(ev *Event, raw []byte, lookup KeyLookup) error {
+	return CheckSignaturesWith(ev, raw, func(server string, keyIDs []string, _ int64) (map[string]VerifyKey, error) {
+		return lookup(server, keyIDs)
+	})
+}
+
+// CheckSignaturesWith is CheckSignatures with a KeyFetch.
+func CheckSignaturesWith(ev *Event, raw []byte, lookup KeyFetch) error {
 	rv := ev.Room
 	// Keys must be valid at the event's origin_server_ts from room v5 on
 	// (enforce_key_validity); before that, at any time at all.
@@ -434,7 +445,7 @@ func CheckSignatures(ev *Event, raw []byte, lookup KeyLookup) error {
 
 // verifyForServer is Keyring.process_request for one server: every key we
 // hold that is valid at validity must verify, and there must be one.
-func verifyForServer(server string, signed []byte, validity int64, lookup KeyLookup) error {
+func verifyForServer(server string, signed []byte, validity int64, lookup KeyFetch) error {
 	sigs, ok := field(get(gjson.ParseBytes(signed), "signatures"), server)
 	if !ok || !sigs.IsObject() {
 		return &SignatureError{Msg: "not signed by " + server}
@@ -443,7 +454,7 @@ func verifyForServer(server string, signed []byte, validity int64, lookup KeyLoo
 	if len(keyIDs) == 0 {
 		return &SignatureError{Msg: "not signed by " + server}
 	}
-	found, err := lookup(server, keyIDs)
+	found, err := lookup(server, keyIDs, validity)
 	if err != nil {
 		return err
 	}

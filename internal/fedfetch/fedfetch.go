@@ -20,6 +20,7 @@ import (
 
 	"maunium.net/go/mautrix/federation"
 
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/keyring"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pdu"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pdustore"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pduverify"
@@ -46,11 +47,13 @@ type Client struct {
 	v      *pduverify.Verifier
 	policy pduverify.PolicyAsker
 	server string
+	keys   *keyring.Keyring
 }
 
-// New builds a client over a signed federation client.
-func New(fed *federation.Client, st *pdustore.Store, v *pduverify.Verifier, policy pduverify.PolicyAsker, server string) *Client {
-	return &Client{fed: fed, st: st, v: v, policy: policy, server: server}
+// New builds a client over a signed federation client. keys, when not nil,
+// finds signing keys Synapse does not hold yet.
+func New(fed *federation.Client, st *pdustore.Store, v *pduverify.Verifier, policy pduverify.PolicyAsker, server string, keys *keyring.Keyring) *Client {
+	return &Client{fed: fed, st: st, v: v, policy: policy, server: server, keys: keys}
 }
 
 func (c *Client) do(ctx context.Context, server, method string, path []any, query url.Values, body, out any) error {
@@ -194,10 +197,13 @@ func (c *Client) check(ctx context.Context, raw []byte, rv *pdu.RoomVersion, roo
 		// Synapse redacts it.
 		return nil, fmt.Errorf("%w: pulled event %s fails its content hash", ErrUncertain, id)
 	}
-	lookup := func(server string, keyIDs []string) (map[string]pdu.VerifyKey, error) {
+	lookup := func(server string, keyIDs []string, _ int64) (map[string]pdu.VerifyKey, error) {
 		return c.st.VerifyKeys(ctx, server, keyIDs)
 	}
-	if err := pdu.CheckSignatures(ev, raw, lookup); err != nil {
+	if c.keys != nil {
+		lookup = c.keys.Fetch(ctx)
+	}
+	if err := pdu.CheckSignaturesWith(ev, raw, lookup); err != nil {
 		// A key Synapse would fetch, or a signature it would look for a
 		// good copy of.
 		return nil, fmt.Errorf("%w: pulled event %s: %v", ErrUncertain, id, err)

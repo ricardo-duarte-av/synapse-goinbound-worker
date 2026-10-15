@@ -10,6 +10,7 @@ import (
 	"github.com/tidwall/gjson"
 
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/acl"
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/keyring"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pdu"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pdustore"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pduverify"
@@ -36,6 +37,9 @@ type FrontDoorDeps struct {
 	Policy    pduverify.PolicyAsker // nil: never ask (and so never certain)
 	Processor *Processor
 	Server    string
+	// Keys, when set, finds keys Synapse does not hold yet, as its Keyring
+	// would; without it such a transaction is Synapse's.
+	Keys *keyring.Keyring
 }
 
 // FrontDoor plans and runs transactions' PDUs.
@@ -153,10 +157,13 @@ func (f *FrontDoor) checkSigs(ctx context.Context, pp *plannedPDU) string {
 		return "pdu_content_hash"
 	}
 	ev := pp.ev
-	lookup := func(server string, keyIDs []string) (map[string]pdu.VerifyKey, error) {
+	lookup := func(server string, keyIDs []string, _ int64) (map[string]pdu.VerifyKey, error) {
 		return f.d.Store.VerifyKeys(ctx, server, keyIDs)
 	}
-	if err := pdu.CheckSignatures(ev, pp.raw, lookup); err != nil {
+	if f.d.Keys != nil {
+		lookup = f.d.Keys.Fetch(ctx)
+	}
+	if err := pdu.CheckSignaturesWith(ev, pp.raw, lookup); err != nil {
 		if errors.Is(err, pdu.ErrKeyUnknown) {
 			// Synapse would fetch the key.
 			return "pdu_key_unknown"

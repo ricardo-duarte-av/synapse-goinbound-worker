@@ -14,6 +14,7 @@ import (
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/fedclient"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/fedfetch"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/inbound"
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/keyring"
 	"net"
 	"net/http"
 	"net/http/pprof"
@@ -295,6 +296,8 @@ func buildHandler(ctx context.Context, cfg *config.Config, up *proxy.Proxy, log 
 			return nil, noop, err
 		}
 		proc = inbound.NewProcessor(wdb, pv, persister{repl, hs.Writers}, pst, hs.ServerName, log)
+		// Keys Synapse does not hold yet, found as its Keyring would.
+		keys := keyring.New(hs.ServerName, pst.VerifyKeys, notaries)
 		if cfg.Write.FetchesMissingEvents() {
 			line, err := hs.SigningKeyLine()
 			if err != nil {
@@ -311,12 +314,12 @@ func buildHandler(ctx context.Context, cfg *config.Config, up *proxy.Proxy, log 
 				return nil, noop, err
 			}
 			proc.EnableMissingEvents(&inbound.MissingDeps{
-				Fetch: fedfetch.New(fc, pst, pv, asker, hs.ServerName), Store: pst, Verifier: pv,
+				Fetch: fedfetch.New(fc, pst, pv, asker, hs.ServerName, keys), Store: pst, Verifier: pv,
 			})
 			log.Info().Msg("Write mode fetches missing prev events from the origin")
 		}
 		fd := inbound.NewFrontDoor(inbound.FrontDoorDeps{
-			Store: pst, Verifier: pv, ACL: acls, Policy: asker, Processor: proc, Server: hs.ServerName,
+			Store: pst, Verifier: pv, ACL: acls, Policy: asker, Processor: proc, Server: hs.ServerName, Keys: keys,
 		})
 		opts.PDUMode, opts.PDUServer, opts.Responses = cfg.Modes.PDU, frontDoor{fd}, wdb
 		proc.Start()
