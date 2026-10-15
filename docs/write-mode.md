@@ -89,9 +89,12 @@ Everything else goes through Synapse's replication endpoints:
   no traffic. Under `native` its events would stay staged.
 - Guest-access changes are deferred (Synapse kicks local guests; there are none).
 - Origins in backoff: served with `write.mark_origins_up` (the reset, its
-  `caches` stream row and RDATA, then `REMOTE_SERVER_UP`). Signed requests to
-  endpoints other than `/send` still reach the Python worker, which resets
-  them itself.
+  `caches` stream row and RDATA, then `REMOTE_SERVER_UP`). Only `/send`
+  reaches this worker (`not_send` is 0); other federation endpoints go to
+  other workers, which reset the origin themselves.
+- nginx vhost `gosync.aguiarvieira.pt` (`proxy_host/324.conf`) still sends
+  `/send` straight to the Python worker. It must point here before the
+  Python worker goes.
 
 ## Rollout
 
