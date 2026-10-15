@@ -92,9 +92,10 @@ Everything else goes through Synapse's replication endpoints:
   `caches` stream row and RDATA, then `REMOTE_SERVER_UP`). Only `/send`
   reaches this worker (`not_send` is 0); other federation endpoints go to
   other workers, which reset the origin themselves.
-- nginx vhost `gosync.aguiarvieira.pt` (`proxy_host/324.conf`) still sends
-  `/send` straight to the Python worker. It must point here before the
-  Python worker goes.
+- nginx vhost `gosync.aguiarvieira.pt` (`proxy_host/324.conf`) sent `/send`
+  straight to the Python worker. It was left over from testing gosync, carried
+  no federation traffic, and is being removed (operator, 2026-10-15). After
+  that, the only route to the Python worker is through us.
 
 ## Rollout
 
