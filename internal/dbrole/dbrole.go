@@ -1,9 +1,9 @@
-// Package dbrole creates and repairs the read-only PostgreSQL role this worker
-// serves with.
+// Package dbrole creates and repairs the PostgreSQL roles this worker serves
+// with: the read-only role, and for write mode a role granted exactly the
+// tables Synapse's inbound worker writes itself (docs/write-mode.md).
 //
-// It is the only code in this worker that changes the database, and what it
-// changes is the role, never Synapse's data: CREATE/ALTER ROLE and GRANT
-// SELECT. It runs at startup, and only when connecting as the role failed or
+// What it changes is roles, never Synapse's data: CREATE/ALTER ROLE, GRANT,
+// and for a write role REVOKE, so its grants are exactly the spec's. It runs at startup, and only when connecting as the role failed or
 // the role lacked something, using homeserver.yaml's credentials -- on a
 // homeserver with a PostgreSQL of its own that is the database's only user, and
 // a superuser. The serving connection never uses those credentials.
@@ -51,7 +51,20 @@ type Spec struct {
 	Password string
 	// Tables are granted SELECT, all in schema public.
 	Tables []string
+	// Writes are granted on top. A role with writes is not made read-only.
+	Writes []Grant
+	// Sequences are granted USAGE (nextval).
+	Sequences []string
 }
+
+// Grant is privileges on one table, e.g. "INSERT, DELETE" or "UPDATE (id)".
+type Grant struct {
+	Table      string
+	Privileges string
+}
+
+// ReadOnly says whether the role may only read.
+func (s Spec) ReadOnly() bool { return len(s.Writes) == 0 }
 
 // Ensure creates the role if it does not exist and brings it to Spec if it
 // does. Every statement is idempotent, so running it on a correct role
@@ -85,8 +98,12 @@ func Ensure(ctx context.Context, adminDSN string, spec Spec) error {
 	if err != nil {
 		return err
 	}
+	// One transaction: a write role's revoke is never seen without its
+	// grants.
+	stmts = append(append([]statement{{"begin", "BEGIN"}}, stmts...), statement{"commit", "COMMIT"})
 	for _, st := range stmts {
 		if _, err := conn.Exec(ctx, st.sql); err != nil {
+			_, _ = conn.Exec(ctx, "ROLLBACK")
 			var pgErr *pgconn.PgError
 			if errors.As(err, &pgErr) && pgErr.Code == "42501" {
 				return fmt.Errorf("dbrole: %s is not allowed to %s (%s); create the role by hand with deploy/readonly-role.sql",
@@ -139,14 +156,73 @@ func statements(ctx context.Context, conn *pgx.Conn, spec Spec) ([]statement, er
 	out = append(out,
 		statement{"grant connect", "GRANT CONNECT ON DATABASE " + pgx.Identifier{db}.Sanitize() + " TO " + role},
 		statement{"grant schema usage", "GRANT USAGE ON SCHEMA public TO " + role},
-		statement{"grant select", "GRANT SELECT ON " + strings.Join(tables, ", ") + " TO " + role},
-		// Belt and braces: even a write that somehow reached the database
-		// as this role could not commit.
-		statement{"make the role read-only", "ALTER ROLE " + role + " SET default_transaction_read_only = on"},
-		// Every query is a primary-key lookup; anything slow is wrong.
-		statement{"set statement timeout", "ALTER ROLE " + role + " SET statement_timeout = '10s'"},
 	)
+	if !spec.ReadOnly() {
+		// Exactly what the spec says: whatever else the role was given goes.
+		out = append(out,
+			statement{"revoke table privileges", "REVOKE ALL ON ALL TABLES IN SCHEMA public FROM " + role},
+			statement{"revoke sequence privileges", "REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM " + role},
+		)
+	}
+	if len(tables) > 0 {
+		out = append(out, statement{"grant select", "GRANT SELECT ON " + strings.Join(tables, ", ") + " TO " + role})
+	}
+	for _, g := range spec.Writes {
+		if !validPrivileges(g.Privileges) {
+			return nil, fmt.Errorf("dbrole: bad privileges %q on %s", g.Privileges, g.Table)
+		}
+		out = append(out, statement{"grant " + g.Privileges + " on " + g.Table,
+			"GRANT " + g.Privileges + " ON " + pgx.Identifier{"public", g.Table}.Sanitize() + " TO " + role})
+	}
+	for _, sq := range spec.Sequences {
+		out = append(out, statement{"grant usage on " + sq,
+			"GRANT USAGE ON SEQUENCE " + pgx.Identifier{"public", sq}.Sanitize() + " TO " + role})
+	}
+	if spec.ReadOnly() {
+		out = append(out,
+			// Belt and braces: even a write that somehow reached the
+			// database as this role could not commit.
+			statement{"make the role read-only", "ALTER ROLE " + role + " SET default_transaction_read_only = on"},
+			// Every query is a primary-key lookup; anything slow is wrong.
+			statement{"set statement timeout", "ALTER ROLE " + role + " SET statement_timeout = '10s'"},
+		)
+	} else {
+		out = append(out,
+			statement{"let the role write", "ALTER ROLE " + role + " SET default_transaction_read_only = off"},
+			// A full state group of a big room is ~150k rows.
+			statement{"set statement timeout", "ALTER ROLE " + role + " SET statement_timeout = '60s'"},
+		)
+	}
 	return out, nil
+}
+
+// validPrivileges accepts a comma-separated list of table privileges, each
+// optionally restricted to columns, as GRANT takes them, and nothing else.
+func validPrivileges(p string) bool {
+	if strings.TrimSpace(p) == "" {
+		return false
+	}
+	for _, part := range strings.Split(p, ",") {
+		name, cols, hasCols := strings.Cut(strings.TrimSpace(part), "(")
+		switch strings.TrimSpace(name) {
+		case "SELECT", "INSERT", "UPDATE", "DELETE":
+		default:
+			return false
+		}
+		if !hasCols {
+			continue
+		}
+		cols, ok := strings.CutSuffix(cols, ")")
+		if !ok || strings.TrimSpace(cols) == "" {
+			return false
+		}
+		for _, r := range cols {
+			if !(r == '_' || r == ' ' || r >= 'a' && r <= 'z' || r >= '0' && r <= '9') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // scramVerifier builds the SCRAM-SHA-256 verifier PostgreSQL stores for a

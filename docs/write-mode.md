@@ -67,8 +67,8 @@ Everything else goes through Synapse's replication endpoints:
 |---|---|---|
 | 1 | Decisions match Synapse: signatures, policy, auth, state, state groups, soft-fail, push, `fed_send_events` body | **done** (shadow, 0 mismatches) |
 | 2 | v2.1 forwards reachability over several link batches | **done** (`c851f57`) |
-| 3 | Write role with exactly the tables above | todo |
-| 4 | Staging, room lock, purge read lock, interoperable with Python | todo |
+| 3 | Write role with exactly the tables above | **done** (`dbrole` writes, `inbound.Grants`); not yet created at startup |
+| 4 | Staging, room lock, purge read lock, interoperable with Python | **done** (`internal/inbound`: Synapse's SQL, tested on a throwaway PostgreSQL) |
 | 5 | Room queue processor and the one-minute sweep | todo |
 | 6 | `/send` answer per PDU, and `received_transactions` | todo |
 | 7 | The writes: state groups, push staging, `fed_send_events`, unstage | todo |

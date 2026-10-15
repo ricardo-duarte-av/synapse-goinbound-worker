@@ -186,6 +186,21 @@ things that are not derivable from the code.
   Ours was renamed to `exported_instance` at scrape time, and every "by
   writer" panel silently grouped by the scrape target. The label is `writer`.
 
+- **Write-mode tests use a throwaway PostgreSQL, never the live one.**
+  It holds the live schema and no rows:
+
+      docker run --rm -v /var/sockets:/var/sockets:ro postgres:18-alpine \
+        pg_dump --schema-only --no-owner --no-privileges -h /var/sockets -U synapse synapse-db > schema.sql
+      docker run -d --name goinbound-testpg --tmpfs /var/lib/postgresql \
+        -e POSTGRES_USER=synapse -e POSTGRES_PASSWORD=test -e POSTGRES_DB=synapse \
+        -p 127.0.0.1:55432:5432 postgres:18-alpine
+      docker exec -i goinbound-testpg psql -q -U synapse -d synapse < schema.sql
+      INBOUND_TEST_ADMIN_DSN="host=127.0.0.1 port=55432 user=synapse password=test dbname=synapse" go test ./internal/inbound/
+
+  The tests create the write role from `inbound.Grants` and run as it, so a
+  missing grant fails there. `worker_read_write_locks`' triggers run as the
+  caller, which is why `worker_read_write_locks_mode` is granted too.
+
 - `TestLiveEnsure` (dbrole) does DDL on the real database: it creates and
   drops a throwaway role. The auto-mode classifier blocks it, so the operator
   runs it.
