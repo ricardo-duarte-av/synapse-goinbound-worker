@@ -160,3 +160,14 @@ func TestWriteMode(t *testing.T) {
 		}
 	}
 }
+
+func TestWriteOrigins(t *testing.T) {
+	w := "write:\n  instance_name: goinbound-worker\n  origins: [daedric.net]\n"
+	cfg, err := parse([]byte(base + w + "modes:\n  edu: canary:5\n  pdu: canary:0\n"))
+	if err != nil || len(cfg.Write.Origins) != 1 {
+		t.Fatalf("%v %v", cfg, err)
+	}
+	if _, err := parse([]byte(base + w + "modes:\n  edu: canary:5\n  pdu: shadow\n")); err == nil {
+		t.Error("write origins accepted without write mode")
+	}
+}

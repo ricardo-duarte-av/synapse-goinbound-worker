@@ -385,6 +385,8 @@ func (c *Config) validate() error {
 	case c.Modes.PDU.Kind == ModeNative && c.Modes.EDU.Kind != ModeNative:
 		return fmt.Errorf("modes.pdu is native, so modes.edu must be native too: " +
 			"a write-mode origin's every transaction is ours")
+	case len(c.Write.Origins) > 0 && !c.Modes.PDU.ServesNatively():
+		return fmt.Errorf("write.origins is set, but modes.pdu is %s; write origins need modes.pdu canary:N (0 for only them) or native", c.Modes.PDU)
 	case c.Modes.PDU.Kind == ModeCanary && !(c.Modes.EDU.Kind == ModeNative ||
 		c.Modes.EDU.Kind == ModeCanary && c.Modes.EDU.CanaryPercent >= c.Modes.PDU.CanaryPercent):
 		return fmt.Errorf("modes.pdu is %s, so modes.edu must be canary:%d or more, or native: "+
@@ -408,6 +410,10 @@ type Write struct {
 	// Role is the write role, granted exactly the tables write mode writes.
 	// Default "goinbound_rw".
 	Role string `yaml:"role"`
+	// Origins are served by write mode whatever the canary percentage: a
+	// canary that starts with servers we control. Their EDU-only
+	// transactions are ours too, so an origin is only ever in one process.
+	Origins []string `yaml:"origins"`
 	// MissingEvents is what write mode does with an event whose prev events
 	// are missing: "defer" (the default) leaves it staged for Synapse's
 	// worker; "fetch" fetches them from the origin as Synapse does, which

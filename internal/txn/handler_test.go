@@ -685,3 +685,22 @@ func TestCanaryShadowsOriginsNotSelected(t *testing.T) {
 		t.Errorf("forwarded EDUs for an origin not selected: %v", r.sender.list())
 	}
 }
+
+// A write origin is ours at canary 0, its EDU-only transactions too; other
+// origins are not.
+func TestWriteOriginsAreServedAtCanaryZero(t *testing.T) {
+	ps := &fakePDUServer{results: map[string]json.RawMessage{"$a": json.RawMessage(`{}`)}}
+	r, _ := pduRig(t, config.Mode{Kind: config.ModeCanary, CanaryPercent: 0}, config.Mode{Kind: config.ModeCanary, CanaryPercent: 0}, ps)
+	r.h.writeOrigins = setOf([]string{"remote.example"})
+	if rec := send(t, r.h, "remote.example", "t1", pduTxn); rec.Code != 200 || r.up.count() != 0 {
+		t.Fatalf("write origin's PDU transaction: %d, proxied %d", rec.Code, r.up.count())
+	}
+	if send(t, r.h, "remote.example", "t2", eduOnly); r.up.count() != 0 {
+		t.Error("write origin's EDU-only transaction was proxied")
+	}
+	send(t, r.h, "other.example", "t3", pduTxn)
+	send(t, r.h, "other.example", "t4", eduOnly)
+	if r.up.count() != 2 {
+		t.Errorf("other origin: proxied %d of 2", r.up.count())
+	}
+}

@@ -326,8 +326,9 @@ func buildHandler(ctx context.Context, cfg *config.Config, up *proxy.Proxy, log 
 			Store: pst, Verifier: pv, ACL: acls, Policy: asker, Processor: proc, Server: hs.ServerName, Keys: keys,
 		})
 		opts.PDUMode, opts.PDUServer, opts.Responses = cfg.Modes.PDU, frontDoor{fd}, wdb
+		opts.WriteOrigins = cfg.Write.Origins
 		proc.Start()
-		log.Warn().Str("mode", cfg.Modes.PDU.String()).Str("instance", cfg.Write.InstanceName).
+		log.Warn().Str("mode", cfg.Modes.PDU.String()).Str("instance", cfg.Write.InstanceName).Strs("origins", cfg.Write.Origins).
 			Msg("Write mode on: PDUs of the selected origins are persisted here")
 	}
 	h := txn.NewHandler(opts)

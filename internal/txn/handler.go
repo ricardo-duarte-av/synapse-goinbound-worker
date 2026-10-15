@@ -102,6 +102,9 @@ type Options struct {
 	// them all.
 	PDUMode   config.Mode
 	PDUServer PDUServer
+	// WriteOrigins are served by write mode whatever PDUMode's percentage,
+	// EDU-only transactions included.
+	WriteOrigins []string
 	// Responses, when set, stores every answer given here.
 	Responses TxnResponses
 	// DomainWhitelist is federation_domain_whitelist; nil means none.
@@ -127,6 +130,7 @@ type Handler struct {
 	pdus           PDUSink
 	pduMode        config.Mode
 	pduServer      PDUServer
+	writeOrigins   map[string]bool
 	responses      TxnResponses
 	log            zerolog.Logger
 }
@@ -150,6 +154,7 @@ func NewHandler(o Options) *Handler {
 		pdus:           o.PDUs,
 		pduMode:        o.PDUMode,
 		pduServer:      o.PDUServer,
+		writeOrigins:   setOf(o.WriteOrigins),
 		responses:      o.Responses,
 		log:            o.Log,
 	}
@@ -395,7 +400,7 @@ func (h *Handler) decide(ctx context.Context, origin, txnID string, body []byte,
 	if len(pdus) > 0 && (!applyCanary || h.pduServer == nil || !h.pduSelected(origin)) {
 		return decision{proxyReason: reasonHasPDUs}
 	}
-	if applyCanary && h.mode.Kind == config.ModeCanary && !canarySelected(origin, h.mode.CanaryPercent) {
+	if applyCanary && h.mode.Kind == config.ModeCanary && !canarySelected(origin, h.mode.CanaryPercent) && !h.writeOrigins[origin] {
 		return decision{proxyReason: reasonCanary}
 	}
 
@@ -441,9 +446,17 @@ func (h *Handler) pduSelected(origin string) bool {
 	case config.ModeNative:
 		return true
 	case config.ModeCanary:
-		return canarySelected(origin, h.pduMode.CanaryPercent)
+		return h.writeOrigins[origin] || canarySelected(origin, h.pduMode.CanaryPercent)
 	}
 	return false
+}
+
+func setOf(l []string) map[string]bool {
+	m := map[string]bool{}
+	for _, s := range l {
+		m[s] = true
+	}
+	return m
 }
 
 // canarySelected picks a stable subset of origins. Selecting by origin rather
