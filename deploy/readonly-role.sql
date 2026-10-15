@@ -29,6 +29,7 @@ GRANT USAGE ON SCHEMA public TO goinbound_ro;
 GRANT SELECT ON
     current_state_events,
     destinations,
+    device_lists_remote_cache,
     event_auth,
     event_auth_chain_links,
     event_auth_chains,
