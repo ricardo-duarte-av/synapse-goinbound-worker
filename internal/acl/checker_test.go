@@ -106,3 +106,31 @@ func TestServerHost(t *testing.T) {
 		}
 	}
 }
+
+// One evaluator per room: kept while the room's ACL event is unchanged,
+// replaced when it changes.
+func TestCheckerKeepsOneEvaluatorPerRoom(t *testing.T) {
+	db := &fakeLookup{events: map[string]*store.ServerACLEvent{
+		"!r:x": aclEvent("$1", `{"allow":["*"],"deny":["a"]}`),
+	}}
+	c := NewChecker(db, 5*time.Second)
+	now := time.Unix(1000, 0)
+	c.now = func() time.Time { return now }
+
+	_, _ = c.Allowed(context.Background(), "a", "!r:x")
+	first := c.rooms["!r:x"].acl
+	now = now.Add(6 * time.Second)
+	_, _ = c.Allowed(context.Background(), "a", "!r:x")
+	if c.rooms["!r:x"].acl != first {
+		t.Error("an unchanged ACL event was parsed again")
+	}
+
+	db.events["!r:x"] = aclEvent("$2", `{"allow":["*"],"deny":["b"]}`)
+	now = now.Add(6 * time.Second)
+	if ok, _ := c.Allowed(context.Background(), "a", "!r:x"); !ok {
+		t.Error("the replaced ACL still applies")
+	}
+	if ok, _ := c.Allowed(context.Background(), "b", "!r:x"); ok {
+		t.Error("the new ACL does not apply")
+	}
+}

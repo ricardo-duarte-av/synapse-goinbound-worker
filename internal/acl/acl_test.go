@@ -1,6 +1,10 @@
 package acl
 
-import "testing"
+import (
+	"math/rand/v2"
+	"strings"
+	"testing"
+)
 
 func acl(t *testing.T, content string) *ServerACL {
 	t.Helper()
@@ -107,3 +111,49 @@ func TestParseServerACLRejectsInvalidJSON(t *testing.T) {
 // changes its ACL cannot be served the old one — the key changes with it.
 // This is the property that makes caching a *mutable* piece of room state safe
 // without any invalidation signal.
+
+// glob.match must agree with the regular expression it replaces, which is
+// what Synapse's glob_to_regex builds.
+func TestGlobMatchesItsRegex(t *testing.T) {
+	alphabet := []rune("ab.*?:-KkKéÉ\n")
+	rng := rand.New(rand.NewPCG(1, 2))
+	word := func(n int, wild bool) string {
+		var sb strings.Builder
+		for range rng.IntN(n) {
+			r := alphabet[rng.IntN(len(alphabet))]
+			if !wild && (r == '*' || r == '?') {
+				r = 'a'
+			}
+			sb.WriteRune(r)
+		}
+		return sb.String()
+	}
+	fixed := [][2]string{
+		{"*.evil.example", "a.evil.example"}, {"*.evil.example", "evil.example"},
+		{"EVIL.example", "evil.EXAMPLE"}, {"?**?**?", "ab"}, {"?**?**?", "abc"},
+		{"*", ""}, {"", ""}, {"a*b*c", "aXbYbc"}, {"k", "K"}, {"*", "a\nb"},
+	}
+	check := func(g, name string) {
+		re, err := globToRegex(g)
+		if err != nil {
+			t.Fatalf("%q: %v", g, err)
+		}
+		if got, want := glob(g).match(name), re.MatchString(name); got != want {
+			t.Errorf("glob %q on %q: %v, regexp says %v", g, name, got, want)
+		}
+	}
+	for _, c := range fixed {
+		check(c[0], c[1])
+	}
+	for range 200_000 {
+		check(word(8, true), word(10, false))
+	}
+}
+
+// A glob the regexp could not represent was skipped, so it still is.
+func TestOverlongWildcardRunIsSkipped(t *testing.T) {
+	a := acl(t, `{"allow":["*"],"deny":["`+strings.Repeat("?", 1001)+`*"]}`)
+	if !a.Allowed(strings.Repeat("a", 2000)) {
+		t.Error("an uncompilable deny glob applied")
+	}
+}

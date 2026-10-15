@@ -156,6 +156,12 @@ things that are not derivable from the code.
   heap. Now: an LRU of 400k entries, groups rebuilt from a cached prev
   group's delta, and the state after compared as an overlay. Peak 141MB.
 
+- **Server ACLs are big and churn.** Moderation bots post ~800 ACL events a
+  day here, of up to 1,600 globs each. One compiled regexp per glob, kept
+  by event ID, grew the heap ~45MB/hour (found with pprof, 2026-10-15).
+  Now one evaluator per room, replaced when the room's ACL event changes,
+  and globs are matched directly; `globToRegex` stays as the test oracle.
+
 - **Never name a metric label `instance` (or `job`).** Prometheus owns those.
   Ours was renamed to `exported_instance` at scrape time, and every "by
   writer" panel silently grouped by the scrape target. The label is `writer`.

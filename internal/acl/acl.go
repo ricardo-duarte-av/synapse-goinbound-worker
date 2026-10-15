@@ -18,8 +18,8 @@ import (
 // allowed is rejected.
 type ServerACL struct {
 	allowIPLiterals bool
-	allow           []*regexp.Regexp
-	deny            []*regexp.Regexp
+	allow           []glob
+	deny            []glob
 }
 
 // aclContent is the parsed event content. Fields are decoded leniently because
@@ -58,7 +58,7 @@ func ParseServerACL(eventJSON []byte) (*ServerACL, error) {
 }
 
 // compileGlobs decodes a list of glob strings, skipping any non-string entries.
-func compileGlobs(raw json.RawMessage) []*regexp.Regexp {
+func compileGlobs(raw json.RawMessage) []glob {
 	if len(raw) == 0 {
 		return nil
 	}
@@ -67,17 +67,13 @@ func compileGlobs(raw json.RawMessage) []*regexp.Regexp {
 		// Not a list at all; Synapse logs and ignores it.
 		return nil
 	}
-	out := make([]*regexp.Regexp, 0, len(items))
+	out := make([]glob, 0, len(items))
 	for _, item := range items {
-		s, ok := item.(string)
-		if !ok {
-			continue
+		// A run of over 1000 '?' is beyond a regexp's repeat count, and
+		// such a glob used to be skipped for failing to compile.
+		if s, ok := item.(string); ok && !strings.Contains(s, strings.Repeat("?", 1001)) {
+			out = append(out, glob(s))
 		}
-		re, err := globToRegex(s)
-		if err != nil {
-			continue
-		}
-		out = append(out, re)
 	}
 	return out
 }
@@ -102,13 +98,13 @@ func (a *ServerACL) Allowed(serverName string) bool {
 		}
 	}
 
-	for _, re := range a.deny {
-		if re.MatchString(serverName) {
+	for _, g := range a.deny {
+		if g.match(serverName) {
 			return false
 		}
 	}
-	for _, re := range a.allow {
-		if re.MatchString(serverName) {
+	for _, g := range a.allow {
+		if g.match(serverName) {
 			return true
 		}
 	}
@@ -119,8 +115,53 @@ func (a *ServerACL) Allowed(serverName string) bool {
 	return false
 }
 
+// glob is an ACL glob, matched the way the regular expression globToRegex
+// builds from it matches, without compiling one: a compiled expression is
+// ~0.5KB, and the ACLs moderation bots keep re-sending hold 1,600 globs
+// each.
+type glob string
+
+// match reports whether name matches the whole glob, case-insensitively.
+// '?' is one character and '*' any run of them, except a newline (a
+// regexp's '.'), and a character is a rune, as in the regexp.
+func (g glob) match(name string) bool {
+	if strings.IndexByte(name, '\n') >= 0 {
+		// Never in a server name. Not worth a second matcher.
+		re, err := globToRegex(string(g))
+		return err == nil && re.MatchString(name)
+	}
+	p, s := []rune(string(g)), []rune(name)
+	// The classic wildcard match: on a mismatch, let the last '*' take one
+	// more character and retry from there.
+	i, j, star, mark := 0, 0, -1, 0
+	for j < len(s) {
+		switch {
+		case i < len(p) && p[i] == '*':
+			star, mark = i, j
+			i++
+		case i < len(p) && (p[i] == '?' || sameRune(p[i], s[j])):
+			i++
+			j++
+		case star >= 0:
+			mark++
+			i, j = star+1, mark
+		default:
+			return false
+		}
+	}
+	for i < len(p) && p[i] == '*' {
+		i++
+	}
+	return i == len(p)
+}
+
+// sameRune is the regexp's (?i) equality: same simple case folding orbit.
+func sameRune(a, b rune) bool {
+	return a == b || strings.EqualFold(string(a), string(b))
+}
+
 // globToRegex converts a Matrix ACL glob to an anchored, case-insensitive
-// regular expression.
+// regular expression. glob.match is checked against it.
 //
 // Runs of wildcards are collapsed the way Synapse does, so that a pattern like
 // "?**?**?" becomes ".{3,}" rather than a backtracking hazard. Only '*' and '?'

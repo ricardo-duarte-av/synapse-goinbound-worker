@@ -37,23 +37,22 @@ type Checker struct {
 
 	mu    sync.Mutex
 	rooms map[string]roomEntry
-	// parsed holds evaluators by ACL event id. An event is immutable, so an
-	// entry can never be wrong, only unused.
-	parsed map[string]*ServerACL
 }
 
+// roomEntry is a room's current ACL. The evaluator is kept while the room's
+// ACL event stays the same, and replaced with it: moderation bots send ~800
+// ACL events a day here, of up to 1,600 globs each, so evaluators kept by
+// event ID pile up.
 type roomEntry struct {
 	at       time.Time
+	eventID  string
 	acl      *ServerACL // nil: the room has no ACL
 	redacted bool
 }
 
-// Bounds on the caches. Exceeding one clears it: these hold seconds' worth of
-// lookups, so rebuilding is cheap, and an LRU would be machinery for nothing.
-const (
-	maxRooms  = 10000
-	maxParsed = 2000
-)
+// maxRooms bounds the cache. Exceeding it clears it: rebuilding is a
+// lookup and a parse per room, and an LRU would be machinery for nothing.
+const maxRooms = 10000
 
 // NewChecker builds a Checker. A ttl of zero uses 5s.
 func NewChecker(db Lookup, ttl time.Duration) *Checker {
@@ -61,11 +60,10 @@ func NewChecker(db Lookup, ttl time.Duration) *Checker {
 		ttl = 5 * time.Second
 	}
 	return &Checker{
-		db:     db,
-		ttl:    ttl,
-		now:    time.Now,
-		rooms:  make(map[string]roomEntry),
-		parsed: make(map[string]*ServerACL),
+		db:    db,
+		ttl:   ttl,
+		now:   time.Now,
+		rooms: make(map[string]roomEntry),
 	}
 }
 
@@ -92,12 +90,12 @@ func (c *Checker) lookup(ctx context.Context, roomID string) (roomEntry, error) 
 	now := c.now()
 
 	c.mu.Lock()
-	if e, ok := c.rooms[roomID]; ok && now.Sub(e.at) < c.ttl {
-		c.mu.Unlock()
-		aclLookups.WithLabelValues("cached").Inc()
-		return e, nil
-	}
+	old, had := c.rooms[roomID]
 	c.mu.Unlock()
+	if had && now.Sub(old.at) < c.ttl {
+		aclLookups.WithLabelValues("cached").Inc()
+		return old, nil
+	}
 
 	ev, err := c.db.CurrentServerACL(ctx, roomID)
 	if err != nil {
@@ -108,8 +106,12 @@ func (c *Checker) lookup(ctx context.Context, roomID string) (roomEntry, error) 
 
 	e := roomEntry{at: now}
 	if ev != nil {
-		e.redacted = ev.Redacted
-		e.acl = c.parse(ev)
+		e.eventID, e.redacted = ev.EventID, ev.Redacted
+		if had && old.eventID == ev.EventID && old.redacted == ev.Redacted {
+			e.acl = old.acl
+		} else {
+			e.acl = parse(ev)
+		}
 	}
 
 	c.mu.Lock()
@@ -121,31 +123,17 @@ func (c *Checker) lookup(ctx context.Context, roomID string) (roomEntry, error) 
 	return e, nil
 }
 
-// parse returns the evaluator for an ACL event, cached by event id.
+// parse returns the evaluator for an ACL event.
 //
 // An event that does not parse yields an evaluator that allows everyone. The
 // stored JSON of a persisted event always parses, so this is unreachable in
 // practice. Malformed VALUES inside a parseable event are ignored field by
 // field, as Synapse does (storage/controllers/state.py:920).
-func (c *Checker) parse(ev *store.ServerACLEvent) *ServerACL {
-	c.mu.Lock()
-	a, ok := c.parsed[ev.EventID]
-	c.mu.Unlock()
-	if ok {
-		return a
-	}
-
+func parse(ev *store.ServerACLEvent) *ServerACL {
 	a, err := ParseServerACL(ev.JSON)
 	if err != nil {
 		a = &ServerACL{allowIPLiterals: true, allow: allowAll}
 	}
-
-	c.mu.Lock()
-	if len(c.parsed) >= maxParsed {
-		c.parsed = make(map[string]*ServerACL)
-	}
-	c.parsed[ev.EventID] = a
-	c.mu.Unlock()
 	return a
 }
 
