@@ -365,7 +365,26 @@ type SignatureError struct {
 	Msg string
 	// Key is the key that failed, when one did.
 	Key *VerifyKey
+	// Server is the server whose signature failed, Role why it had to sign
+	// (SigSender, SigEventDomain, SigAuthorising), KeyID the key, and Kind
+	// how it failed (SigNotSigned, SigForged, SigBadLength, SigMalformed).
+	Server, Role, KeyID, Kind string
 }
+
+// Why a server must sign, as _check_sigs_on_pdu words it.
+const (
+	SigSender      = "sender domain"
+	SigEventDomain = "event domain"
+	SigAuthorising = "authorising serve" // sic
+)
+
+// How a signature failed.
+const (
+	SigNotSigned = "not signed"
+	SigForged    = "forged"     // BadSignatureError
+	SigBadLength = "bad length" // nacl ValueError: not 64 bytes
+	SigMalformed = "malformed"  // not a string, or base64 we decode differently
+)
 
 func (e *SignatureError) Error() string { return "signature: " + e.Msg }
 
@@ -402,7 +421,7 @@ func CheckSignaturesWith(ev *Event, raw []byte, lookup KeyFetch) error {
 	if err != nil {
 		return err
 	}
-	var servers []string
+	var servers, roles []string
 	tpi := false
 	if ev.Type == "m.room.member" {
 		if m, err := ev.Membership(); err == nil && m == "invite" && has(ev.Content, "third_party_invite") {
@@ -410,7 +429,7 @@ func CheckSignaturesWith(ev *Event, raw []byte, lookup KeyFetch) error {
 		}
 	}
 	if !tpi {
-		servers = append(servers, senderDomain)
+		servers, roles = append(servers, senderDomain), append(roles, SigSender)
 	}
 	if rv.EventFormat == FormatV1V2 {
 		d, err := domainOf(ev.ID)
@@ -418,7 +437,7 @@ func CheckSignaturesWith(ev *Event, raw []byte, lookup KeyFetch) error {
 			return err
 		}
 		if d != senderDomain {
-			servers = append(servers, d)
+			servers, roles = append(servers, d), append(roles, SigEventDomain)
 		}
 	}
 	if rv.RestrictedJoinRule && ev.Type == "m.room.member" {
@@ -431,12 +450,16 @@ func CheckSignaturesWith(ev *Event, raw []byte, lookup KeyFetch) error {
 			if err != nil {
 				return err
 			}
-			servers = append(servers, d)
+			servers, roles = append(servers, d), append(roles, SigAuthorising)
 		}
 	}
 
-	for _, server := range servers {
+	for i, server := range servers {
 		if err := verifyForServer(server, signed, validity, lookup); err != nil {
+			var se *SignatureError
+			if errors.As(err, &se) {
+				se.Role = roles[i]
+			}
 			return err
 		}
 	}
@@ -448,11 +471,11 @@ func CheckSignaturesWith(ev *Event, raw []byte, lookup KeyFetch) error {
 func verifyForServer(server string, signed []byte, validity int64, lookup KeyFetch) error {
 	sigs, ok := field(get(gjson.ParseBytes(signed), "signatures"), server)
 	if !ok || !sigs.IsObject() {
-		return &SignatureError{Msg: "not signed by " + server}
+		return &SignatureError{Msg: "not signed by " + server, Server: server, Kind: SigNotSigned}
 	}
 	keyIDs := keys(sigs)
 	if len(keyIDs) == 0 {
-		return &SignatureError{Msg: "not signed by " + server}
+		return &SignatureError{Msg: "not signed by " + server, Server: server, Kind: SigNotSigned}
 	}
 	found, err := lookup(server, keyIDs, validity)
 	if err != nil {
@@ -479,12 +502,20 @@ func verifyForServer(server string, signed []byte, validity int64, lookup KeyFet
 		}
 		sig, ok := field(sigs, kid)
 		if !ok || sig.Type != gjson.String {
-			return &SignatureError{Msg: "malformed signature " + kid}
+			return &SignatureError{Msg: "malformed signature " + kid, Server: server, KeyID: kid, Kind: SigMalformed}
 		}
 		raw, err := decodeUnpaddedBase64(sig.Str)
 		if err != nil || !ed25519.Verify(k.Key, canon, raw) {
 			k := k
-			return &SignatureError{Msg: fmt.Sprintf("invalid signature for %s with key %s", server, kid), Key: &k}
+			kind := SigForged
+			switch {
+			case err != nil:
+				kind = SigMalformed
+			case len(raw) != ed25519.SignatureSize:
+				kind = SigBadLength
+			}
+			return &SignatureError{Msg: fmt.Sprintf("invalid signature for %s with key %s", server, kid), Key: &k,
+				Server: server, KeyID: kid, Kind: kind}
 		}
 		verified = true
 	}

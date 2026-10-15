@@ -1,9 +1,11 @@
 package inbound
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -67,6 +69,9 @@ type plannedPDU struct {
 	policy pduverify.PolicyVerdict
 	// redacted: the content hash fails, so the pruned copy is staged.
 	redacted bool
+	// failed is the answer's entry for a PDU whose signatures fail; it is
+	// not staged.
+	failed json.RawMessage
 }
 
 // PlanPDUs checks a transaction's PDUs as _handle_pdus_in_txn and
@@ -165,10 +170,17 @@ func (f *FrontDoor) checkSigs(ctx context.Context, pp *plannedPDU) string {
 	}
 	if err := pdu.CheckSignaturesWith(ev, pp.raw, lookup); err != nil {
 		if errors.Is(err, pdu.ErrKeyUnknown) {
-			// Synapse would fetch the key.
+			// Not found where Synapse would look.
 			return "pdu_key_unknown"
 		}
-		// Synapse's error text is its own to write.
+		var se *pdu.SignatureError
+		if errors.As(err, &se) {
+			if entry, ok := signatureErrorEntry(se); ok {
+				// Not staged; the answer says why, in Synapse's words.
+				pp.failed = entry
+				return ""
+			}
+		}
 		return "pdu_bad_signature"
 	}
 	if !ok {
@@ -221,6 +233,9 @@ func (p *Plan) Run(ctx context.Context) map[string]json.RawMessage {
 
 func (p *Plan) stage(ctx context.Context, pp *plannedPDU) json.RawMessage {
 	f := p.f
+	if pp.failed != nil {
+		return pp.failed
+	}
 	if pp.redacted {
 		staged, err := pduverify.RedactedStagedEvent(pp.raw, pp.rv, p.at)
 		if err != nil {
@@ -252,7 +267,39 @@ func (p *Plan) stage(ctx context.Context, pp *plannedPDU) json.RawMessage {
 }
 
 // errorEntry is {"error": str(e)}.
-func errorEntry(err error) json.RawMessage {
-	b, _ := json.Marshal(map[string]string{"error": err.Error()})
-	return b
+func errorEntry(err error) json.RawMessage { return errorJSON(err.Error()) }
+
+// errorJSON is {"error": msg}, without Go's HTML escaping.
+func errorJSON(msg string) json.RawMessage {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(map[string]string{"error": msg})
+	return bytes.TrimRight(b.Bytes(), "\n")
+}
+
+// signatureErrorEntry is the /send entry for a PDU whose signature check
+// fails: {"error": str(FederationError("ERROR", 403, str(e)))}, e being
+// _check_sigs_on_pdu's InvalidEventSignatureError around the Keyring's
+// SynapseError around signedjson's SignatureVerifyException. ok is false
+// for a failure whose words we do not reproduce.
+func signatureErrorEntry(se *pdu.SignatureError) (json.RawMessage, bool) {
+	var inner string
+	switch se.Kind {
+	case pdu.SigNotSigned:
+		inner = "400: Not signed by " + se.Server
+	case pdu.SigForged:
+		inner = fmt.Sprintf("401: Invalid signature for server %s with key %s: Unable to verify signature for %s: "+
+			"<class 'nacl.exceptions.BadSignatureError'> Signature was forged or corrupt", se.Server, se.KeyID, se.Server)
+	case pdu.SigBadLength:
+		inner = fmt.Sprintf("401: Invalid signature for server %s with key %s: Unable to verify signature for %s: "+
+			"<class 'nacl.exceptions.ValueError'> The signature must be exactly 64 bytes long", se.Server, se.KeyID, se.Server)
+	default:
+		return nil, false
+	}
+	if se.Role == "" {
+		return nil, false
+	}
+	msg := fmt.Sprintf("ERROR 403: unable to verify signature for %s %s: %s", se.Role, se.Server, inner)
+	return errorJSON(msg), true
 }
