@@ -149,6 +149,9 @@ things that are not derivable from the code.
   30s timeout. Write mode must ask too: without it, spam Synapse soft-fails
   gets through. The stored copy shows what happened (an added signature,
   or `policy_server_spammy`), so the shadow can check without asking.
+  It asks anyway (`policy_ask`), signed as us: the operator allows
+  contacting policy servers at any time (2026-10-15). About 8% of PDUs in
+  policy rooms make Synapse ask (~45/hour).
 
 - **homeserver.yaml has duplicate keys** (`msc3814_enabled` twice).
   PyYAML keeps the last one; yaml.v3 refuses the whole file, so

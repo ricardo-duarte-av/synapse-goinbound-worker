@@ -28,6 +28,7 @@ import (
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/fedauth"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pdustore"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pduverify"
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/policysign"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/proxy"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/replication"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/stateres"
@@ -239,6 +240,19 @@ func buildHandler(ctx context.Context, cfg *config.Config, up *proxy.Proxy, log 
 		} else {
 			pv.EnablePush(pc)
 		}
+		// The policy servers Synapse asks are asked too, signed as us.
+		var asker pduverify.PolicyAsker
+		var allow func(string) bool
+		if hs.DomainWhitelist != nil {
+			allow = func(s string) bool { return hs.DomainWhitelist[s] }
+		}
+		if line, err := hs.SigningKeyLine(); err != nil {
+			log.Warn().Err(err).Msg("PDU shadow: policy_ask check off")
+		} else if pc, err := policysign.New(hs.ServerName, line, allow); err != nil {
+			log.Warn().Err(err).Msg("PDU shadow: policy_ask check off")
+		} else {
+			asker = pc
+		}
 		live = pduverify.NewLive(pv, pst, pduverify.LiveOptions{
 			Concurrency: cfg.PDUShadow.Concurrency,
 			Queue:       cfg.PDUShadow.Queue,
@@ -246,6 +260,7 @@ func buildHandler(ctx context.Context, cfg *config.Config, up *proxy.Proxy, log 
 			PrevWait:    time.Duration(cfg.PDUShadow.PrevWaitSeconds) * time.Second,
 			ServerName:  hs.ServerName,
 			ACL:         acls,
+			Policy:      asker,
 		}, log)
 		log.Info().Msg("PDU shadow on: PDUs Synapse accepts are checked once it has persisted them")
 	}

@@ -245,3 +245,35 @@ func TestLiveHomeserverYAML(t *testing.T) {
 		t.Error("main is not in instance_map; unknown EDU types could not be forwarded")
 	}
 }
+
+// Synapse's path is inside its own container; the key is found beside
+// homeserver.yaml, and the first key line is the one Synapse signs with.
+func TestSigningKeyLine(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "homeserver.yaml")
+	if err := os.WriteFile(filepath.Join(dir, "example.org.signing.key"),
+		[]byte("# a comment\ned25519 a_one AAAA\ned25519 a_two BBBB\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct{ name, yaml string }{
+		{"absolute path elsewhere", "server_name: example.org\nsigning_key_path: /data/example.org.signing.key\n"},
+		{"default path", "server_name: example.org\n"},
+	} {
+		cfg, err := parse([]byte(c.yaml), cfgPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := cfg.SigningKeyLine()
+		if err != nil || got != "ed25519 a_one AAAA" {
+			t.Errorf("%s: got %q, %v", c.name, got, err)
+		}
+	}
+	cfg := mustParse(t, "server_name: example.org\nsigning_key: \"ed25519 inline CCCC\"\n")
+	if got, err := cfg.SigningKeyLine(); err != nil || got != "ed25519 inline CCCC" {
+		t.Errorf("inline: got %q, %v", got, err)
+	}
+	cfg = mustParse(t, "server_name: nowhere.org\n")
+	if _, err := cfg.SigningKeyLine(); err == nil {
+		t.Error("a missing key file was not an error")
+	}
+}

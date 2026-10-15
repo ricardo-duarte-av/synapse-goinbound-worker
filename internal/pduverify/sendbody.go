@@ -151,6 +151,9 @@ type SendInput struct {
 	// signature from: write mode adds the one it is given, which the
 	// check takes from Synapse's copy.
 	PolicySigned string
+	// PolicySigs, when set, are the signatures the policy server gave us,
+	// added in place of Synapse's.
+	PolicySigs map[string]string
 }
 
 // SendBody builds the fed_send_events entry write mode would send for the
@@ -266,7 +269,19 @@ func (s *Verifier) buildSendEntry(ctx context.Context, in SendInput) (sendEntry,
 	if err != nil {
 		return sendEntry{}, "event_from_pdu_json: " + err.Error(), nil
 	}
-	if in.PolicySigned != "" {
+	if in.PolicySigs != nil {
+		sigs, _ := evDict["signatures"].(map[string]any)
+		if sigs != nil {
+			mine, _ := sigs[in.PolicySigned].(map[string]any)
+			if mine == nil {
+				mine = map[string]any{}
+				sigs[in.PolicySigned] = mine
+			}
+			for k, v := range in.PolicySigs {
+				mine[k] = v
+			}
+		}
+	} else if in.PolicySigned != "" {
 		sigs, _ := evDict["signatures"].(map[string]any)
 		var stored map[string]any
 		d := json.NewDecoder(bytes.NewReader([]byte(gjson.GetBytes(ev.JSON, "signatures").Get(gjson.Escape(in.PolicySigned)).Raw)))

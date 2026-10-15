@@ -310,8 +310,21 @@ to the event before it is persisted; a refusal soft-fails it as
 `policy_server_spammy`. The shadow decides on arrival which Synapse will
 do, from the room's current state (`no policy server`, `policy event`,
 `signed`, `Synapse asks`), and reads what it did from the stored copy:
-`asked, signed` or `asked, refused`. It does not ask the policy server
-itself. `send_body` then expects the signature Synapse was given. `pdusweep -send` runs it on history, rebuilding each PDU as received
+`asked, signed` or `asked, refused`.
+
+When Synapse asks, the shadow asks too, at once (`policy_ask`), as Synapse
+does: the event as `get_pdu_json` gives it, POSTed with an X-Matrix header
+signed with our server's key (the first in `signing_key_path`, read beside
+homeserver.yaml), the unstable endpoint tried when the stable one is
+unknown, one attempt with a 30s timeout, and the answer's signatures
+verified against the room's key. Any error is a refusal, as for Synapse.
+ed25519 is deterministic, so a server that signed for both gave both the
+same signature: `same signature`, `both refused`, or a mismatch with reason
+`policy answer`. `send_body` then expects our signatures (Synapse's when
+we were refused). Without a readable signing key the check is off and the
+others run.
+
+`pdusweep -send` runs `send_body` on history, rebuilding each PDU as received
 from the stored JSON. On 2026-10-15, 625 events across v3-v12, forks
 included: every remote one matched; the rest are `local event`.
 

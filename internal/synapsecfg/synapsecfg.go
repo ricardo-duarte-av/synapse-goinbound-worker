@@ -94,6 +94,8 @@ type Config struct {
 	// AppServiceFiles are app_service_config_files, resolved to readable
 	// paths (beside homeserver.yaml when Synapse's own path is absent).
 	AppServiceFiles []string
+
+	signingKey, signingKeyPath string
 }
 
 // Flag reads a boolean experimental feature, with Synapse's default.
@@ -108,6 +110,9 @@ func (c *Config) Flag(name string, def bool) bool {
 // a Synapse upgrade that adds options cannot stop this parsing.
 type raw struct {
 	ServerName string `yaml:"server_name"`
+
+	SigningKey     string `yaml:"signing_key"`
+	SigningKeyPath string `yaml:"signing_key_path"`
 
 	InstanceMap map[string]struct {
 		Path string `yaml:"path"`
@@ -179,7 +184,7 @@ func parse(b []byte, path string) (*Config, error) {
 		return nil, fmt.Errorf("synapsecfg: %s has no server_name", path)
 	}
 
-	cfg := &Config{Path: path, ServerName: r.ServerName}
+	cfg := &Config{Path: path, ServerName: r.ServerName, signingKey: r.SigningKey, signingKeyPath: r.SigningKeyPath}
 
 	var err error
 	if cfg.InstanceMap, err = instanceMap(r); err != nil {
@@ -304,6 +309,32 @@ func writers(r raw) (Writers, error) {
 		*f.dst = names
 	}
 	return w, nil
+}
+
+// SigningKeyLine is the key Synapse signs federation requests with: the first
+// of signing_key, or of the file at signing_key_path (by default
+// "<server_name>.signing.key" beside homeserver.yaml), as a
+// "<algorithm> <version> <seed>" line. It is read only when asked for:
+// nothing but asking a policy server needs it.
+func (c *Config) SigningKeyLine() (string, error) {
+	body := c.signingKey
+	if body == "" {
+		p := c.signingKeyPath
+		if p == "" {
+			p = c.ServerName + ".signing.key"
+		}
+		b, err := readBeside(p, c.Path)
+		if err != nil {
+			return "", fmt.Errorf("synapsecfg: signing key: %w", err)
+		}
+		body = string(b)
+	}
+	for _, line := range strings.Split(body, "\n") {
+		if line = strings.TrimSpace(line); line != "" && !strings.HasPrefix(line, "#") {
+			return line, nil
+		}
+	}
+	return "", fmt.Errorf("synapsecfg: the signing key holds no key")
 }
 
 // replicationSecret reproduces config/workers.py:248.

@@ -29,6 +29,7 @@ type Live struct {
 	prevWait time.Duration
 	server   string
 	acl      ACL
+	asker    PolicyAsker
 	onRes    func(string, *Result)
 	wg       sync.WaitGroup
 	ctx      context.Context
@@ -50,6 +51,8 @@ type job struct {
 	agree    string // a reason we and Synapse both ignore the PDU, if any
 	fail     string // an error preparing, if any
 	policy   PolicyVerdict
+	// answer is the policy server's answer to us, when Synapse asks it.
+	answer chan PolicyAnswer
 }
 
 // LiveOptions tunes the shadow.
@@ -71,6 +74,9 @@ type LiveOptions struct {
 	// ACL, when set, is checked against the transaction's origin, as
 	// Synapse does before handling a room's PDUs.
 	ACL ACL
+	// Policy, when set, asks a room's policy server whenever Synapse does,
+	// and its answer is compared with Synapse's (the policy_ask check).
+	Policy PolicyAsker
 	// OnResult, when set, is called with every check's result. For tests.
 	OnResult func(check string, r *Result)
 }
@@ -96,7 +102,7 @@ func NewLive(v *Verifier, st *pdustore.Store, o LiveOptions, log zerolog.Logger)
 		o.PrevWait = time.Minute
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	l := &Live{v: v, st: st, log: log, queue: make(chan *job, o.Queue), maxWait: o.MaxWait, prevWait: o.PrevWait, server: o.ServerName, acl: o.ACL, onRes: o.OnResult, ctx: ctx, cancel: cancel}
+	l := &Live{v: v, st: st, log: log, queue: make(chan *job, o.Queue), maxWait: o.MaxWait, prevWait: o.PrevWait, server: o.ServerName, acl: o.ACL, asker: o.Policy, onRes: o.OnResult, ctx: ctx, cancel: cancel}
 	for i := 0; i < o.Concurrency; i++ {
 		l.wg.Add(1)
 		go l.work()
@@ -241,6 +247,13 @@ func (l *Live) prepare(j *job) {
 	// current state, before staging the PDU.
 	if j.policy, err = l.v.Policy(ctx, j.raw, ev, l.server); err != nil {
 		j.policy = PolicyVerdict{Skip: "policy lookup"}
+	}
+	if j.policy.Verdict == policyAsk && l.asker != nil {
+		// At once, as Synapse does, and without holding up the snapshot.
+		j.answer = make(chan PolicyAnswer, 1)
+		go func(v PolicyVerdict) {
+			j.answer <- l.v.AskPolicy(l.ctx, l.asker, j.raw, j.received, rv, v)
+		}(j.policy)
 	}
 	types, err := pdu.AuthTypesForEvent(rv, ev)
 	if err != nil {
@@ -387,6 +400,19 @@ func (l *Live) check(j *job) {
 	policyCheck := func(ctx context.Context, id string) *Result {
 		return l.v.CheckPolicy(ctx, id, j.raw, j.policy)
 	}
+	var answer *PolicyAnswer
+	policyAsk := func(ctx context.Context, id string) *Result {
+		if j.answer == nil {
+			return &Result{EventID: id, Outcome: OutcomeSkipped, Reason: "Synapse did not ask"}
+		}
+		select {
+		case a := <-j.answer:
+			answer = &a
+		case <-ctx.Done():
+			return &Result{EventID: id, Outcome: OutcomeError, Reason: "shutting down"}
+		}
+		return l.v.CheckPolicyAsk(ctx, id, j.raw, j.policy, policy, *answer)
+	}
 	sendBody := func(ctx context.Context, id string) *Result {
 		if replayed == nil {
 			return &Result{EventID: id, Outcome: OutcomeSkipped, Reason: "state_auth did not match"}
@@ -398,6 +424,9 @@ func (l *Live) check(j *job) {
 		switch {
 		case policy == nil || policy.Outcome != OutcomeMatch:
 			return &Result{EventID: id, Outcome: OutcomeSkipped, Reason: "policy did not match"}
+		case policy.Reason == "asked, signed" && answer != nil && answer.Sigs != nil:
+			// What write mode adds: the policy server's answer to us.
+			in.PolicySigned, in.PolicySigs = j.policy.Server, answer.Sigs
 		case policy.Reason == "asked, signed":
 			in.PolicySigned = j.policy.Server
 		}
@@ -413,7 +442,7 @@ func (l *Live) check(j *job) {
 	for _, c := range []struct {
 		name string
 		run  func(context.Context, string) *Result
-	}{{"signatures", l.v.CheckSigs}, {"policy", policyCheck}, {"state_auth", replay}, {"state_groups", stateGroups}, {"soft_fail", softFail}, {"send_body", sendBody}, {"push", pushCheck}} {
+	}{{"signatures", l.v.CheckSigs}, {"policy", policyCheck}, {"policy_ask", policyAsk}, {"state_auth", replay}, {"state_groups", stateGroups}, {"soft_fail", softFail}, {"send_body", sendBody}, {"push", pushCheck}} {
 		res := c.run(ctx, eventID)
 		res.EventID = eventID
 		switch c.name {
@@ -530,6 +559,7 @@ func reasonLabel(outcome, reason string) string {
 		"event_from_pdu_json", "policy server soft-failed it", "send body", "local event",
 		"no policy server", "policy event", "signed", "asked, signed", "asked, refused", "Synapse asks",
 		"policy event redacted", "policy server host not looked up", "policy lookup", "policy did not match", "policy",
+		"Synapse did not ask", "both refused", "same signature", "policy answer", "shutting down",
 		"push not configured", "invite", "min depth", "no state before", "pruned", "redacted", "push",
 		"unparseable", "event id", "content hash", "state resolution", "auth",
 	} {
