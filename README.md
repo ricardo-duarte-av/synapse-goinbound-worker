@@ -334,7 +334,7 @@ included: every remote one matched; the rest are `local event`.
 Push actions are checked last. The shadow reproduces
 `BulkPushRuleEvaluator._action_for_event_by_user` against each user's push
 rules (`internal/push`, a port of Synapse's Rust evaluator, with the base
-rules dumped from the deployed 1.162). Then it compares the rows with
+rules dumped from the deployed Synapse). Then it compares the rows with
 `event_push_actions`. The inputs are:
 
 - the local members, minus the sender and appservice-exclusive users;

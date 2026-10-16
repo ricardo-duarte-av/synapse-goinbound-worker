@@ -864,10 +864,9 @@ func PushConfigFor(hs *synapsecfg.Config) (PushConfig, error) {
 			MSC3381Polls:         hs.Flag("msc3381_polls_enabled", false),
 			MSC3664:              hs.Flag("msc3664_enabled", false),
 			MSC4028EncryptedPush: hs.Flag("msc4028_push_encrypted_events", false),
-			// 1.162 has no msc4075 switch: its rules always apply.
-			MSC4075: true,
-			MSC4210: hs.Flag("msc4210_enabled", false),
-			MSC4306: hs.Flag("msc4306_enabled", false),
+			MSC4075:              hs.Flag("msc4075_enabled", false),
+			MSC4210:              hs.Flag("msc4210_enabled", false),
+			MSC4306:              hs.Flag("msc4306_enabled", false),
 		},
 	}, nil
 }

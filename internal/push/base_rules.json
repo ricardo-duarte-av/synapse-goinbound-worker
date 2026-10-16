@@ -1,5 +1,5 @@
 {
- "synapse_version": "1.162.0",
+ "synapse_version": "1.163.0",
  "rules": [
   {
    "rule_id": "global/override/.m.rule.master",
@@ -106,6 +106,60 @@
     {
      "set_tweak": "sound",
      "value": "default"
+    }
+   ],
+   "default": true,
+   "default_enabled": true
+  },
+  {
+   "rule_id": "global/override/.org.matrix.msc4075.rule.rtc.invite_for_me",
+   "priority_class": 5,
+   "conditions": [
+    {
+     "kind": "event_match",
+     "key": "type",
+     "pattern": "org.matrix.msc4075.rtc.notification"
+    },
+    {
+     "kind": "event_property_contains",
+     "key": "content.m\\.mentions.user_ids",
+     "value_type": "user_id"
+    }
+   ],
+   "actions": [
+    "notify",
+    {
+     "set_tweak": "sound",
+     "value": "ring"
+    }
+   ],
+   "default": true,
+   "default_enabled": true
+  },
+  {
+   "rule_id": "global/override/.org.matrix.msc4075.rule.rtc.invite_for_room",
+   "priority_class": 5,
+   "conditions": [
+    {
+     "kind": "event_match",
+     "key": "type",
+     "pattern": "org.matrix.msc4075.rtc.notification"
+    },
+    {
+     "kind": "event_property_is",
+     "key": "content.m\\.mentions.room",
+     "value": true
+    },
+    {
+     "kind": "sender_notification_permission",
+     "key": "room"
+    }
+   ],
+   "actions": [
+    "notify",
+    {
+     "set_tweak": "sound",
+     "value": "ring"
     }
    ],
    "default": true,

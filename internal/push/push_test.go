@@ -1,6 +1,7 @@
 package push
 
 import (
+	"bytes"
 	"encoding/json"
 	"reflect"
 	"strings"
@@ -379,6 +380,60 @@ func TestThreadSubscription(t *testing.T) {
 		c := cond(t, `{"kind":"io.element.msc4306.thread_subscription","subscribed":`+map[bool]string{true: "true", false: "false"}[tc.subscribed]+`}`)
 		if got, _ := e.Match(c, "", "", tc.state); got != tc.want {
 			t.Errorf("subscribed=%v state=%v: %v, want %v", tc.subscribed, tc.state, got, tc.want)
+		}
+	}
+}
+
+// MSC4075's RTC invite rules (Synapse 1.163), ported from base_rules.rs's
+// tests: the generic mention rules are disabled so that they cannot mask
+// them, as they have the same actions and come right after.
+func TestRTCInviteRules(t *testing.T) {
+	const alice, bob = "@alice:example.org", "@bob:example.org"
+	const ring = `"notify",{"set_tweak":"sound","value":"ring"}`
+	rules := func(msc4075 bool) *Filtered {
+		return Filter(NewRuleset(nil), map[string]bool{
+			"global/override/.m.rule.is_user_mention": false,
+			"global/override/.m.rule.is_room_mention": false,
+		}, Flags{MSC4075: msc4075})
+	}
+	run := func(rs *Filtered, typ string, users []string, room bool, senderLevel int64) string {
+		mentions := map[string]any{"user_ids": users}
+		if room {
+			mentions["room"] = true
+		}
+		b, _ := json.Marshal(map[string]any{"type": typ, "content": map[string]any{"m.mentions": mentions}})
+		e := NewEvaluator(Evaluator{Flat: Flatten(b), HasMentions: true, RoomMemberCount: 10,
+			SenderPowerLevel: &senderLevel, NotificationLevels: map[string]int64{}})
+		var parts []string
+		for _, a := range e.Run(rs, alice, "", nil) {
+			var buf bytes.Buffer
+			if err := json.Compact(&buf, a); err != nil {
+				t.Fatal(err)
+			}
+			parts = append(parts, buf.String())
+		}
+		return strings.Join(parts, ",")
+	}
+	const rtc = "org.matrix.msc4075.rtc.notification"
+	for _, c := range []struct {
+		name        string
+		msc4075     bool
+		typ         string
+		users       []string
+		room        bool
+		senderLevel int64
+		want        string
+	}{
+		{"invite for me notifies the mentioned user", true, rtc, []string{alice}, false, 0, ring},
+		{"invite for me ignores other users", true, rtc, []string{bob}, false, 0, ""},
+		// The default notifications.room level is 50.
+		{"invite for the room notifies with permission", true, rtc, nil, true, 50, ring},
+		{"invite for the room requires permission", true, rtc, nil, true, 0, ""},
+		{"other event types are ignored", true, "org.example.other", []string{alice}, true, 50, ""},
+		{"omitted when msc4075 is disabled", false, rtc, []string{alice}, true, 50, ""},
+	} {
+		if got := run(rules(c.msc4075), c.typ, c.users, c.room, c.senderLevel); got != c.want {
+			t.Errorf("%s: got [%s], want [%s]", c.name, got, c.want)
 		}
 	}
 }

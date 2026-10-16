@@ -6,7 +6,7 @@ worker can be retired (operator, 2026-10-14). nginx sends only
 gopro's or main's, so this is the whole of the job.
 
 This file is the plan and its status. Each item is done when it does what
-Synapse 1.162 does, checked against Synapse, not against the spec.
+the deployed Synapse (1.163) does, checked against Synapse, not against the spec.
 
 ## What the Python worker does for `/send`
 

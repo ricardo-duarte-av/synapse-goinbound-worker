@@ -133,11 +133,16 @@ things that are not derivable from the code.
   Synapse holds was stored after the event arrived is not evidence of anything.
 - **A failing content hash on a stored event is normal** when the event is
   already in its redacted form: Synapse redacts on receipt and stores that.
-- **Port push against the deployed Synapse (1.162), not the checkout.** The
-  `/home/daedric/synapse` checkout is 1.163. At 1.162 there is no
-  `msc4075_enabled` switch (its rules always apply). Every experimental flag
-  defaults to False, msc4210 included. Read the code with
-  `git show v1.162.0:<path>`.
+- **Port against the deployed Synapse, not the checkout.** Since 2026-10-16
+  that is 1.163.0 (it was 1.162.0); the `/home/daedric/synapse` checkout
+  runs ahead of it. Read the code with `git show v1.163.0:<path>`. On an
+  upgrade, diff the two tags for what we port (`event_auth.py`, `state/`,
+  `federation_event.py`, `federation_server.py`, `rust/src/push/`, the
+  replication endpoints, the schema of the tables we write) and re-dump the
+  base push rules from the running Synapse into `internal/push/base_rules.json`
+  (`PushRules([]).rules()`). 1.163 added the MSC4075 RTC invite rules behind
+  `msc4075_enabled`, which this homeserver turns on. Every experimental flag
+  defaults to False, msc4210 included.
 - **`event_push_actions` loses rows, which is not a disagreement.**
   - A read receipt of any type, at or past the event, deletes the reader's
     non-highlight rows. A background loop does it, so the live check
