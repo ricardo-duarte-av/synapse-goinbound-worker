@@ -69,12 +69,12 @@ Everything else goes through Synapse's replication endpoints:
 | 1 | Decisions match Synapse: signatures, policy, auth, state, state groups, soft-fail, push, `fed_send_events` body | **done** (shadow, 0 mismatches) |
 | 2 | v2.1 forwards reachability over several link batches | **done** (`c851f57`) |
 | 2b | Decide: write mode's decision for a staged event, through the state cache, checked live against Synapse (`decide` check) | **in shadow**; defers missing prevs, de-outliering, invites' push, v1 state res, partial state, content-hash failures |
-| 3 | Write role with exactly the tables above | **done** (`dbrole` writes, `inbound.Grants`); not yet created at startup |
+| 3 | Write role with exactly the tables above | **done** (`dbrole` writes, `inbound.Grants`); created or repaired at startup |
 | 4 | Staging, room lock, purge read lock, interoperable with Python | **done** (`internal/inbound`: Synapse's SQL, tested on a throwaway PostgreSQL) |
 | 5 | Room queue processor and the one-minute sweep | **done** (`inbound.Processor`); a deferred event stays staged, with its room, for Synapse's sweep |
 | 6 | `/send` answer per PDU, and `received_transactions` | **done** (`inbound.FrontDoor`, `txn`); a transaction whose PDUs we cannot answer exactly (unknown keys, bad signatures, redaction on receipt) is Synapse's |
 | 7 | The writes: state groups, push staging, `fed_send_events`, unstage | **done**; a failed persist is left staged for Synapse, where Synapse would log it and drop the event |
-| 8 | Missing prevs and state: `/get_missing_events`, `/state_ids`, `/event`, outliers, failed pull attempts | **ported, unverified** (`write.missing_events: fetch`; default `defer`). Pulled events with a bad content hash are kept pruned, and with a bad signature looked for elsewhere (held, or from the sender's server), both recorded as failed pulls; events with failed pulls are retried in the background, as Synapse does. The shadow cannot check this path: Synapse's own fetches happen out of its sight |
+| 8 | Missing prevs and state: `/get_missing_events`, `/state_ids`, `/event`, outliers, failed pull attempts | **done, checked against daedric.net** (`write.missing_events: fetch`; default `defer`): 3- and 12-event gaps made on purpose (`write.test_drop_pdus`, 2026-10-15) were filled as Synapse would. Pulled events with a bad content hash are kept pruned, and with a bad signature looked for elsewhere (held, or from the sender's server), both recorded as failed pulls; events with failed pulls are retried in the background, as Synapse does. The shadow cannot check this path: Synapse's own fetches happen out of its sight |
 | 9 | Side effects: device resync, guest kicks | **done**: device resync (stale mark, then `multi_user_device_resync`); guest-access changes are deferred to Synapse (`allow_guest_access: false` here) |
 | 10 | Rejected events' context | **done** (same groups, `rejected` set; mapped to the group before) |
 | 11 | State resolution v1 | **done** (ported earlier, `a4f5864`); rejected events now left out, as v1's state_map_factory does. v1 forks are rare: 8 in the last 2M stream orderings, all matching |
@@ -94,6 +94,14 @@ arrives with missing prev events, and write mode fetches them as Synapse would:
 event must end up persisted exactly once, with nothing left staged.
 
 ## Known gaps
+
+- Transactions write mode leaves to Synapse on purpose: `PlanPDUs` returns a
+  `pdu_*` reason when a PDU's outcome is not certain to match Synapse's
+  (unknown keys, bad signatures, content hash, policy, ACL). For PDU
+  transactions from origins write mode does not serve, the plan shadow plans
+  them anyway and counts the reason it would have given:
+  `goinbound_pdu_plan_shadow_total{reason}` (`ok`: it would have served it).
+  That is the list of what still needs Python under `native`.
 
 - Partial state rooms are deferred: one here (`!cURbafjkfsMDVwdRDQ:matrix.org`), with
   no traffic. Under `native` its events would stay staged.

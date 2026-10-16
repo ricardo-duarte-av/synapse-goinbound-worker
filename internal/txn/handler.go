@@ -145,6 +145,8 @@ type Handler struct {
 	responses      TxnResponses
 	originUp       OriginUp
 	log            zerolog.Logger
+	// planSem bounds the plan shadow (planDry).
+	planSem chan struct{}
 }
 
 // responseCacheTTL is Synapse's _transaction_resp_cache timeout.
@@ -170,6 +172,7 @@ func NewHandler(o Options) *Handler {
 		responses:      o.Responses,
 		originUp:       o.OriginUp,
 		log:            o.Log,
+		planSem:        make(chan struct{}, planShadowConcurrency),
 	}
 	if h.mode.Kind == config.ModeShadow || h.mode.Kind == config.ModeCanary {
 		// In canary mode, the origins not selected are still evaluated.
@@ -278,6 +281,9 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, body []byte, txn
 	}
 
 	d := h.decide(r.Context(), origin, txnID, body, true, h.store.GetTxnState)
+	if d.proxyReason == reasonHasPDUs {
+		h.planDry(origin, body, time.Now())
+	}
 	if d.proxyReason == reasonCanary && h.shadow != nil {
 		// Not ours to answer, but still evaluated against Synapse's answer,
 		// with the transaction's state read before Synapse sees it.

@@ -658,9 +658,36 @@ func TestWriteModeCanaryLeavesOtherOriginsToSynapse(t *testing.T) {
 	ps := &fakePDUServer{results: map[string]json.RawMessage{}}
 	r, _ := pduRig(t, config.Mode{Kind: config.ModeNative}, config.Mode{Kind: config.ModeCanary, CanaryPercent: 0}, ps)
 	send(t, r.h, "remote.example", "t1", pduTxn)
-	if r.up.count() != 1 || ps.planned.Load() != 0 {
-		t.Errorf("proxied %d, planned %d", r.up.count(), ps.planned.Load())
+	if r.up.count() != 1 {
+		t.Errorf("proxied %d", r.up.count())
 	}
+	// The plan shadow plans it, to count why write mode would leave it to
+	// Synapse, but never runs it.
+	waitFor(t, func() bool { return ps.planned.Load() == 1 })
+	if ps.ran.Load() != 0 {
+		t.Errorf("ran %d", ps.ran.Load())
+	}
+}
+
+// The plan shadow never holds up a request: past its bound, plans are
+// dropped.
+func TestPlanShadowDropsPastItsBound(t *testing.T) {
+	ps := &fakePDUServer{}
+	r, _ := pduRig(t, config.Mode{Kind: config.ModeNative}, config.Mode{Kind: config.ModeCanary, CanaryPercent: 0}, ps)
+	for range planShadowConcurrency {
+		r.h.planSem <- struct{}{}
+	}
+	if rec := send(t, r.h, "remote.example", "t1", pduTxn); r.up.count() != 1 {
+		t.Fatalf("not proxied: %d", rec.Code)
+	}
+	if r.h.planDry("remote.example", []byte(pduTxn), time.Now()) {
+		t.Error("a plan started past the bound")
+	}
+	<-r.h.planSem
+	if !r.h.planDry("remote.example", []byte(pduTxn), time.Now()) {
+		t.Error("no plan started with room for one")
+	}
+	waitFor(t, func() bool { return ps.planned.Load() == 1 })
 }
 
 // In canary mode, an origin not selected is still evaluated, its state read
