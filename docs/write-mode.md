@@ -75,7 +75,7 @@ Everything else goes through Synapse's replication endpoints:
 | 6 | `/send` answer per PDU, and `received_transactions` | **done** (`inbound.FrontDoor`, `txn`); a transaction whose PDUs we cannot answer exactly (unknown keys, bad signatures, redaction on receipt) is Synapse's |
 | 7 | The writes: state groups, push staging, `fed_send_events`, unstage | **done**; a failed persist is left staged for Synapse, where Synapse would log it and drop the event |
 | 8 | Missing prevs and state: `/get_missing_events`, `/state_ids`, `/event`, outliers, failed pull attempts | **done, checked against daedric.net** (`write.missing_events: fetch`; default `defer`): 3- and 12-event gaps made on purpose (`write.test_drop_pdus`, 2026-10-15) were filled as Synapse would. Pulled events with a bad content hash are kept pruned, and with a bad signature looked for elsewhere (held, or from the sender's server), both recorded as failed pulls; events with failed pulls are retried in the background, as Synapse does. The shadow cannot check this path: Synapse's own fetches happen out of its sight |
-| 9 | Side effects: device resync, guest kicks | **done**: device resync (stale mark, then `multi_user_device_resync`); guest-access changes are deferred to Synapse (`allow_guest_access: false` here) |
+| 9 | Side effects: device resync, guest kicks | **done**: device resync (stale mark, then `multi_user_device_resync`); guest-access changes: with no local guest joined or invited (Synapse's own test, on content `kind: guest`), nothing to kick, as in Synapse; otherwise deferred (79 guest accounts from before 2023-11, none in a room, 2026-10-16) |
 | 10 | Rejected events' context | **done** (same groups, `rejected` set; mapped to the group before) |
 | 11 | State resolution v1 | **done** (ported earlier, `a4f5864`); rejected events now left out, as v1's state_map_factory does. v1 forks are rare: 8 in the last 2M stream orderings, all matching |
 | 14 | Signing keys Synapse does not hold yet | **done** (`internal/keyring`: Synapse's order, notaries merged, then the origin); kept in memory, not stored, since storing means invalidating Synapse's caches over replication |
@@ -103,9 +103,11 @@ event must end up persisted exactly once, with nothing left staged.
   `goinbound_pdu_plan_shadow_total{reason}` (`ok`: it would have served it).
   That is the list of what still needs Python under `native`.
 
-- Partial state rooms are deferred: one here (`!cURbafjkfsMDVwdRDQ:matrix.org`), with
-  no traffic. Under `native` its events would stay staged.
-- Guest-access changes are deferred (Synapse kicks local guests; there are none).
+- Partial state rooms are deferred. There are none now: the only one, a v1 room
+  that could not be joined (`!cURbafjkfsMDVwdRDQ:matrix.org`), was deleted by the
+  operator on 2026-10-16.
+- Guest-access changes that would make local guests leave are deferred
+  (none are in any room).
 - Origins in backoff: served with `write.mark_origins_up` (the reset, its
   `caches` stream row and RDATA, then `REMOTE_SERVER_UP`). Only `/send`
   reaches this worker (`not_send` is 0); other federation endpoints go to

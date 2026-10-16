@@ -16,6 +16,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/tidwall/gjson"
 
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pdu"
 )
@@ -531,6 +532,47 @@ func (s *Store) EventExists(ctx context.Context, id string) (bool, error) {
 		return false, fmt.Errorf("pdustore: event exists: %w", err)
 	}
 	return ok, nil
+}
+
+const qLocalMembers = `SELECT c.state_key, ej.json FROM current_state_events c
+	JOIN event_json ej USING (event_id)
+	WHERE c.room_id = $1 AND c.type = 'm.room.member' AND c.state_key LIKE $2`
+
+// LocalGuestMembers counts the members kick_guest_users (room_member.py)
+// would make leave: in the room's current state, a local user's member
+// event with content.membership join or invite and content.kind exactly
+// "guest". ok is false when server cannot be matched with LIKE.
+func (s *Store) LocalGuestMembers(ctx context.Context, roomID, server string) (n int, ok bool, err error) {
+	if strings.ContainsAny(server, `%_\`) {
+		return 0, false, nil
+	}
+	rows, err := s.pool.Query(ctx, qLocalMembers, roomID, "%:"+server)
+	if err != nil {
+		return 0, false, fmt.Errorf("pdustore: local members: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var userID, js string
+		if err := rows.Scan(&userID, &js); err != nil {
+			return 0, false, err
+		}
+		// is_mine_id: the domain after the first colon is ours.
+		if _, domain, found := strings.Cut(userID, ":"); !found || domain != server {
+			continue
+		}
+		content := gjson.Get(js, "content")
+		m, kind := content.Get("membership"), content.Get("kind")
+		if m.Type != gjson.String || (m.Str != "join" && m.Str != "invite") {
+			continue
+		}
+		if kind.Type == gjson.String && kind.Str == "guest" {
+			n++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, false, fmt.Errorf("pdustore: local members: %w", err)
+	}
+	return n, true, nil
 }
 
 const qHostJoined = `SELECT state_key FROM current_state_events

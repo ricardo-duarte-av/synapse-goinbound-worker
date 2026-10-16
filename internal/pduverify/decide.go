@@ -394,9 +394,17 @@ func (s *Verifier) Decide(ctx context.Context, in DecideInput) (*Decision, error
 	}
 
 	if !rej && ev.Type == "m.room.guest_access" && gjson.GetBytes(ev.JSON, "content.guest_access").Str != "can_join" {
-		// _maybe_kick_guest_users kicks local guests; not ported.
-		d.Defer = "guest access change"
-		return d, nil
+		// _maybe_kick_guest_users makes the room's local guests leave. With
+		// none it does nothing, which is what we do; making them leave
+		// (local leave events) is not ported, so then Synapse does it.
+		n, ok, err := s.st.LocalGuestMembers(ctx, ev.RoomID, in.OurServer)
+		if err != nil {
+			return nil, err
+		}
+		if !ok || n > 0 {
+			d.Defer = "guest access change, local guests"
+			return d, nil
+		}
 	}
 	if !rej && ev.Type == "m.room.encrypted" {
 		resync, err := s.needsDeviceResync(ctx, ev)
