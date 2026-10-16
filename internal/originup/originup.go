@@ -106,8 +106,9 @@ func (r *Resetter) Ready() bool {
 
 // Reset marks origin as up, in the background, as Synapse does: the request
 // that showed the origin is alive does not wait for it. A reset already
-// running for origin is not repeated.
-func (r *Resetter) Reset(origin string) {
+// running for origin is not repeated. ip is the address the request came
+// from, for the log.
+func (r *Resetter) Reset(origin, ip string) {
 	r.mu.Lock()
 	if r.inflight[origin] {
 		r.mu.Unlock()
@@ -128,10 +129,10 @@ func (r *Resetter) Reset(origin string) {
 			r.mu.Lock()
 			r.failedAt = r.now()
 			r.mu.Unlock()
-			r.log.Warn().Err(err).Str("origin", origin).Str("outcome", outcome).Msg("Could not mark an origin as up")
+			r.log.Warn().Err(err).Str("origin", origin).Str("ip", ip).Str("outcome", outcome).Msg("Could not mark an origin as up")
 			return
 		}
-		r.log.Info().Str("origin", origin).Msg("Marked origin as up")
+		r.log.Info().Str("origin", origin).Str("ip", ip).Msg("Marked origin as up")
 	}()
 }
 

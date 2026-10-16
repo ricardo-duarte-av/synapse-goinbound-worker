@@ -1,6 +1,8 @@
 package txn
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -16,7 +18,7 @@ type fakeOriginUp struct {
 }
 
 func (f *fakeOriginUp) Ready() bool { return f.ready }
-func (f *fakeOriginUp) Reset(origin string) {
+func (f *fakeOriginUp) Reset(origin, _ string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.resets = append(f.resets, origin)
@@ -65,5 +67,19 @@ func TestOriginInBackoffProxiedWhileResetsFail(t *testing.T) {
 	}
 	if len(up.resets) != 0 {
 		t.Errorf("reset although proxied: %v", up.resets)
+	}
+}
+
+// The client IP is Synapse's: the first X-Forwarded-For entry, else the
+// connection's address.
+func TestClientIP(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPut, "/_matrix/federation/v1/send/t1", nil)
+	r.RemoteAddr = "@"
+	if got := clientIP(r); got != "@" {
+		t.Errorf("no header: %q", got)
+	}
+	r.Header.Set("X-Forwarded-For", " 203.0.113.7 , 10.0.0.1")
+	if got := clientIP(r); got != "203.0.113.7" {
+		t.Errorf("got %q, want the first entry", got)
 	}
 }

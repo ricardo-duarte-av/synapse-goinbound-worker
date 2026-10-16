@@ -38,7 +38,7 @@ func TestBusEndToEnd(t *testing.T) {
 
 	r := New(Options{Store: &fakeStore{}, Publisher: bus, Instance: "goinbound-worker", Log: zerolog.Nop()})
 	go bus.Listen(ctx, r.OnReplicate)
-	r.Reset("down.example")
+	r.Reset("down.example", "")
 	want := []string{
 		`RDATA caches goinbound-worker 101 ["get_destination_retry_timings",["down.example"],1700000000000]`,
 		`REMOTE_SERVER_UP down.example`,

@@ -82,7 +82,7 @@ func waitFor(t *testing.T, cond func() bool) {
 func TestResetPublishesInvalidationThenServerUp(t *testing.T) {
 	s, p := &fakeStore{}, &fakePub{}
 	r := setup(s, p)
-	r.Reset("down.example")
+	r.Reset("down.example", "")
 	waitFor(t, func() bool { return len(p.list()) == 2 })
 	want := []string{
 		`RDATA caches goinbound-worker 101 ["get_destination_retry_timings",["down.example"],1700000000000]`,
@@ -103,7 +103,7 @@ func TestDatabaseErrorPublishesNothing(t *testing.T) {
 	r := setup(s, p)
 	now := time.Unix(1000, 0)
 	r.now = func() time.Time { return now }
-	r.Reset("down.example")
+	r.Reset("down.example", "")
 	waitFor(t, func() bool { return !r.Ready() })
 	if len(p.list()) != 0 {
 		t.Errorf("published after a failed reset: %v", p.list())
@@ -119,7 +119,7 @@ func TestDatabaseErrorPublishesNothing(t *testing.T) {
 func TestLostRDATAIsAnnouncedByPosition(t *testing.T) {
 	s, p := &fakeStore{}, &fakePub{fail: "RDATA"}
 	r := setup(s, p)
-	r.Reset("a.example")
+	r.Reset("a.example", "")
 	waitFor(t, func() bool { return !r.Ready() })
 	r.mu.Lock()
 	r.failedAt = time.Time{}
@@ -133,7 +133,7 @@ func TestLostRDATAIsAnnouncedByPosition(t *testing.T) {
 	p.mu.Lock()
 	p.fail = ""
 	p.mu.Unlock()
-	r.Reset("b.example")
+	r.Reset("b.example", "")
 	waitFor(t, func() bool { return len(p.list()) == 3 })
 	got := p.list()
 	if got[0] != "POSITION caches goinbound-worker 101 101" || !strings.HasPrefix(got[1], "RDATA caches goinbound-worker 102 ") {
@@ -149,7 +149,7 @@ func TestReplicateIsAnsweredWithOurPosition(t *testing.T) {
 	if len(p.list()) != 0 {
 		t.Fatalf("announced a position before writing anything: %v", p.list())
 	}
-	r.Reset("down.example")
+	r.Reset("down.example", "")
 	waitFor(t, func() bool { return len(p.list()) == 2 })
 	r.OnReplicate()
 	if got := p.list(); got[2] != "POSITION caches goinbound-worker 101 101" {
@@ -163,7 +163,7 @@ func TestConcurrentResetsPublishInOrder(t *testing.T) {
 	s, p := &fakeStore{}, &fakePub{}
 	r := setup(s, p)
 	for i := range 20 {
-		r.Reset("o" + strconv.Itoa(i) + ".example")
+		r.Reset("o"+strconv.Itoa(i)+".example", "")
 	}
 	waitFor(t, func() bool { return len(p.list()) == 40 })
 	last := int64(0)
@@ -183,7 +183,7 @@ func TestResetIsNotRepeatedWhileRunning(t *testing.T) {
 	s, p := &fakeStore{gate: make(chan struct{})}, &fakePub{}
 	r := setup(s, p)
 	for range 5 {
-		r.Reset("down.example")
+		r.Reset("down.example", "")
 	}
 	close(s.gate)
 	waitFor(t, func() bool { return len(p.list()) == 2 })

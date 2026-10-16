@@ -21,6 +21,7 @@ import (
 	"hash/fnv"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -83,8 +84,9 @@ type TxnResponses interface {
 type OriginUp interface {
 	// Ready says whether resets currently work.
 	Ready() bool
-	// Reset marks origin as up, in the background.
-	Reset(origin string)
+	// Reset marks origin as up, in the background; ip is where the request
+	// came from, for the log.
+	Reset(origin, ip string)
 }
 
 // EDUs plans and executes a transaction's EDUs.
@@ -303,7 +305,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, body []byte, txn
 	if d.originDown {
 		// As Synapse: on any signed request, before the transaction, and
 		// without waiting for it.
-		h.originUp.Reset(origin)
+		h.originUp.Reset(origin, clientIP(r))
 	}
 	if d.stored != nil {
 		ans := answer{status: d.stored.Code, body: d.stored.JSON}
@@ -550,6 +552,17 @@ func (h *Handler) write(w http.ResponseWriter, ans answer, route, outcome string
 	rec.route, rec.reason, rec.status = route, outcome, ans.status
 	requests.WithLabelValues(route, outcome).Inc()
 	duration.WithLabelValues(route).Observe(time.Since(rec.start).Seconds())
+}
+
+// clientIP is the address a request came from, as Synapse takes it behind a
+// proxy (x_forwarded, http/site.py): the first X-Forwarded-For entry, else
+// the connection's address.
+func clientIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		first, _, _ := strings.Cut(xff, ",")
+		return strings.TrimSpace(first)
+	}
+	return r.RemoteAddr
 }
 
 func jsonError(status int, errcode, msg string) answer {
