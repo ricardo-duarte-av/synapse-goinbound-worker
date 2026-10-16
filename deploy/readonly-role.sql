@@ -51,6 +51,7 @@ GRANT SELECT ON
     received_transactions,
     redactions,
     rejections,
+    room_ban_redactions,
     room_depth,
     room_memberships,
     rooms,

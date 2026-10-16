@@ -26,6 +26,8 @@ var Tables = []string{
 	"events", "event_json", "rooms", "rejections", "event_auth",
 	"event_to_state_groups", "state_groups_state", "state_group_edges", "event_edges",
 	"event_auth_chains", "event_auth_chain_links", "server_signature_keys", "redactions",
+	// MSC4293 redactions, honoured when Synapse loads an event.
+	"room_ban_redactions",
 	"event_forward_extremities", "current_state_events", "partial_state_rooms",
 	"federation_inbound_events_staging", "state_groups",
 	// The push check.

@@ -105,7 +105,8 @@ func (s *Verifier) softFailed(ctx context.Context, ev *pdu.Event, snap *pdustore
 			ids = append(ids, id)
 		}
 	}
-	events, err := s.st.GetEvents(ctx, ids)
+	// get_events_as_list: as Synapse loads them, a redacted event pruned.
+	events, err := s.asSynapseReads(ctx, ids)
 	if err != nil {
 		return false, "", err
 	}
@@ -115,14 +116,6 @@ func (s *Verifier) softFailed(ctx context.Context, ev *pdu.Event, snap *pdustore
 		if e == nil || e.Rejected {
 			// get_events_as_list leaves out what it cannot return.
 			continue
-		}
-		redacted, err := s.st.IsRedacted(ctx, id)
-		if err != nil {
-			return false, "", err
-		}
-		if redacted {
-			// Synapse would see the redacted content; not reproduced.
-			return false, "", &pdu.RaiseError{Msg: "a current auth event is redacted"}
 		}
 		current = append(current, e)
 	}

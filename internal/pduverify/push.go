@@ -596,19 +596,24 @@ func (s *Verifier) flatRelated(ctx context.Context, id string) (push.Flat, error
 	return push.Flatten(e.JSON), nil
 }
 
-// asSynapseReads loads events as get_events returns them: a redacted event
-// in its redacted form.
+// asSynapseReads loads events as get_events returns them: an event whose
+// redaction Synapse honours (RedactedOnLoad, MSC4293's included) in its
+// redacted form.
 func (s *Verifier) asSynapseReads(ctx context.Context, ids []string) (map[string]*pdu.Event, error) {
 	evs, err := s.st.GetEvents(ctx, ids)
 	if err != nil {
 		return nil, err
 	}
+	present := make([]string, 0, len(evs))
+	for id := range evs {
+		present = append(present, id)
+	}
+	redacted, err := s.st.RedactedOnLoad(ctx, present)
+	if err != nil {
+		return nil, err
+	}
 	for id, e := range evs {
-		red, err := s.st.IsRedacted(ctx, id)
-		if err != nil {
-			return nil, err
-		}
-		if !red {
+		if !redacted[id] {
 			continue
 		}
 		pruned, err := pdu.Redact(e.JSON, e.Room)
