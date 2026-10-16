@@ -229,6 +229,7 @@ func (l *Live) prepare(j *job) {
 
 	ev, err := pdu.ParseEvent(j.raw, j.eventID, rv, false)
 	if err != nil {
+		j.decideErr = "unparseable"
 		return // reported by the checks, which parse the stored copy
 	}
 	if l.server != "" {
@@ -263,15 +264,24 @@ func (l *Live) prepare(j *job) {
 	}
 	types, err := pdu.AuthTypesForEvent(rv, ev)
 	if err != nil {
+		j.decideErr = "auth types"
 		return
 	}
 	l.awaitPrevs(ctx, j.eventID, ev.PrevEvents)
 	snap, err := l.st.TakeSnapshot(ctx, j.roomID, j.eventID, ev.PrevEvents, types)
-	if err == nil {
+	switch {
+	case err != nil:
+		j.decideErr = "snapshot failed"
+	case snap.EventPresent:
+		// Synapse persisted it first: write mode's decision would be
+		// made on a room that already holds the event.
 		j.snap = snap
-	}
-	if err == nil && !snap.EventPresent && l.server != "" {
-		l.decide(ctx, j, rv)
+		j.decideErr = "snapshot taken after the event"
+	default:
+		j.snap = snap
+		if l.server != "" {
+			l.decide(ctx, j, rv)
+		}
 	}
 }
 
@@ -641,7 +651,7 @@ var reasonLabels = []string{
 	"deferred: state resolution v1", "deferred: auth", "deferred: soft fail", "deferred: push",
 	"deferred: prev event without state group", "deferred: not in room, invite rescission",
 	"deferred: guest access change, local guests", "deferred",
-	"no decision", "decide failed", "not persisted", "still queued by Synapse",
+	"no decision", "decide failed", "not persisted", "still queued by Synapse", "auth types", "snapshot failed",
 	"push not configured", "invite", "min depth", "no state before", "pruned", "redacted", "push",
 	"unparseable", "event id", "content hash", "state resolution", "auth",
 }
