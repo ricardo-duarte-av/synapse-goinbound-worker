@@ -2313,7 +2313,7 @@
     },
     {
       "type": "row",
-      "title": "Synapse, for comparison",
+      "title": "Handing back to Synapse (what still needs the Python worker, or main)",
       "id": 38,
       "collapsed": false,
       "gridPos": {
@@ -2326,8 +2326,8 @@
     },
     {
       "type": "timeseries",
-      "title": "Synapse: EDUs received over replication, by writer",
-      "description": "ReplicationFederationSendEduRestServlet on each Synapse instance: every EDU forwarded to it, from the Python worker or from us. Moving to native must not change this.",
+      "title": "Staging",
+      "description": "Events in federation_inbound_events_staging (ours and Synapse's) and the age of the oldest, at each minute's sweep. An age of minutes means nobody is processing that room: with write.fallback: synapse, a Synapse process that is not sweeping (see the nudges).",
       "id": 39,
       "datasource": {
         "type": "prometheus",
@@ -2336,6 +2336,288 @@
       "gridPos": {
         "x": 0,
         "y": 95,
+        "w": 6,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "max(goinbound_staging_events{job=~\"$job\"})",
+          "legendFormat": "staged events",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "max(goinbound_staging_oldest_seconds{job=~\"$job\"})",
+          "legendFormat": "oldest (s)",
+          "range": true,
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "PDU transactions write mode would leave to Synapse",
+      "description": "The plan shadow: each PDU transaction from an origin write mode does not serve, planned as write mode would. 'ok' would have been served here; any other reason is a transaction native mode would still proxy.",
+      "id": 40,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 95,
+        "w": 6,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 40,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (reason) (rate(goinbound_pdu_plan_shadow_total{job=~\"$job\"}[$bucket]))",
+          "legendFormat": "{{reason}}",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Events left or given up",
+      "description": "Staged events write mode deferred (left for Synapse) or, with write.fallback: none, gave up on and dropped after three attempts.",
+      "id": 41,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 95,
+        "w": 6,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (outcome) (increase(goinbound_write_events_total{job=~\"$job\", outcome=~\"deferred|error|given_up\"}[$bucket]))",
+          "legendFormat": "{{outcome}}",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Sweep nudges",
+      "description": "A copy of an answered transaction sent upstream on a deferral, so that Synapse starts its staged-events sweep. stored_answer is expected; other_answer means the upstream handled the copy instead of recognising it.",
+      "id": 42,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 95,
+        "w": 6,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (outcome) (increase(goinbound_sweep_nudges_total{job=~\"$job\"}[$bucket]))",
+          "legendFormat": "{{outcome}}",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Synapse, for comparison",
+      "id": 43,
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 103,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Synapse: EDUs received over replication, by writer",
+      "description": "ReplicationFederationSendEduRestServlet on each Synapse instance: every EDU forwarded to it, from the Python worker or from us. Moving to native must not change this.",
+      "id": 44,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 104,
         "w": 8,
         "h": 8
       },
@@ -2392,14 +2674,14 @@
       "type": "timeseries",
       "title": "Synapse: /send reaching the Python worker",
       "description": "FederationSendServlet on the Python inbound worker. Falls by ~96% once EDU-only transactions are native.",
-      "id": 40,
+      "id": 45,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 8,
-        "y": 95,
+        "y": 104,
         "w": 8,
         "h": 8
       },
@@ -2467,14 +2749,14 @@
       "type": "timeseries",
       "title": "Synapse: inbound EDUs and PDUs at the Python worker",
       "description": "What the Python worker still parses.",
-      "id": 41,
+      "id": 46,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 16,
-        "y": 95,
+        "y": 104,
         "w": 8,
         "h": 8
       },
@@ -2541,11 +2823,11 @@
     {
       "type": "row",
       "title": "Database",
-      "id": 42,
+      "id": 47,
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 103,
+        "y": 112,
         "w": 24,
         "h": 1
       },
@@ -2555,14 +2837,14 @@
       "type": "timeseries",
       "title": "Queries by name and result",
       "description": "Every query is a primary-key lookup: txn_state once per native transaction, current_server_acl for typing and receipts (cached 5s per room), server_keys on a key-cache miss.",
-      "id": 43,
+      "id": 48,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 0,
-        "y": 104,
+        "y": 113,
         "w": 8,
         "h": 8
       },
@@ -2619,14 +2901,14 @@
       "type": "timeseries",
       "title": "Query latency (p99)",
       "description": "",
-      "id": 44,
+      "id": 49,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 8,
-        "y": 104,
+        "y": 113,
         "w": 8,
         "h": 8
       },
@@ -2683,14 +2965,14 @@
       "type": "timeseries",
       "title": "ACL lookups by source",
       "description": "cached, db, error, redacted (a redacted ACL sends the transaction to Synapse).",
-      "id": 45,
+      "id": 50,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 16,
-        "y": 104,
+        "y": 113,
         "w": 8,
         "h": 8
       },
@@ -2746,11 +3028,11 @@
     {
       "type": "row",
       "title": "Process: goinbound vs the Python inbound worker",
-      "id": 46,
+      "id": 51,
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 112,
+        "y": 121,
         "w": 24,
         "h": 1
       },
@@ -2760,14 +3042,14 @@
       "type": "timeseries",
       "title": "CPU",
       "description": "Cores used.",
-      "id": 47,
+      "id": 52,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 0,
-        "y": 113,
+        "y": 122,
         "w": 8,
         "h": 8
       },
@@ -2836,14 +3118,14 @@
       "type": "timeseries",
       "title": "Resident memory",
       "description": "",
-      "id": 48,
+      "id": 53,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 8,
-        "y": 113,
+        "y": 122,
         "w": 8,
         "h": 8
       },
@@ -2911,14 +3193,14 @@
       "type": "timeseries",
       "title": "Goroutines and restarts",
       "description": "Goroutines should track request concurrency, not grow. A restart is a step in process_start_time_seconds.",
-      "id": 49,
+      "id": 54,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 16,
-        "y": 113,
+        "y": 122,
         "w": 8,
         "h": 8
       },

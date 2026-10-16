@@ -190,6 +190,14 @@ func (p *Processor) Received(ctx context.Context, origin, roomID, eventID string
 
 // sweep is _handle_old_staged_events.
 func (p *Processor) sweep() {
+	if n, oldest, err := p.db.StagingAge(p.ctx); err == nil {
+		stagedEvents.Set(float64(n))
+		if oldest > 0 {
+			stagedOldest.Set(time.Since(time.UnixMilli(oldest)).Seconds())
+		} else {
+			stagedOldest.Set(0)
+		}
+	}
 	rooms, err := p.db.StagedRooms(p.ctx)
 	if err != nil {
 		if p.ctx.Err() == nil {
@@ -540,6 +548,14 @@ var (
 	outliersPersisted = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "goinbound_write_outliers_total",
 		Help: "State and auth events fetched for missing prevs, persisted as outliers.",
+	})
+	stagedEvents = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "goinbound_staging_events",
+		Help: "Events in federation_inbound_events_staging, ours and Synapse's, at the last minute's sweep.",
+	})
+	stagedOldest = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "goinbound_staging_oldest_seconds",
+		Help: "Age of the oldest staged event at the last minute's sweep, 0 with none. Minutes means nobody is processing its room.",
 	})
 	pruned = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "goinbound_write_pruned_total",

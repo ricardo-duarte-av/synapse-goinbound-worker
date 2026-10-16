@@ -41,6 +41,7 @@ const (
 	qStagedEvents = `SELECT event_id, event_json FROM federation_inbound_events_staging WHERE room_id = $1`
 	qPruneStaged  = `DELETE FROM federation_inbound_events_staging WHERE room_id = $1 AND event_id = ANY($2)`
 	qStagedRooms  = `SELECT DISTINCT room_id FROM federation_inbound_events_staging`
+	qStagingAge   = `SELECT count(*), COALESCE(min(received_ts), 0) FROM federation_inbound_events_staging`
 )
 
 // Staged is a staged event: event.get_dict() and its internal metadata, as
@@ -177,6 +178,15 @@ func stagedPrevs(js string, v1v2 bool) []string {
 		}
 	}
 	return out
+}
+
+// StagingAge counts every staged event, ours or Synapse's, and gives the
+// oldest's received_ts (0 with none).
+func (d *DB) StagingAge(ctx context.Context) (n int64, oldestMS int64, err error) {
+	if err := d.pool.QueryRow(ctx, qStagingAge).Scan(&n, &oldestMS); err != nil {
+		return 0, 0, fmt.Errorf("inbound: staging age: %w", err)
+	}
+	return n, oldestMS, nil
 }
 
 // StagedRooms is get_all_rooms_with_staged_incoming_events.

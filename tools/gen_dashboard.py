@@ -180,6 +180,18 @@ ts("Origins in backoff marked as up", "write.mark_origins_up: an origin we had b
     (f'sum(rate(goinbound_requests_total{{{G}, reason="origin_in_backoff"}}{R}))', "proxied")], unit="ops", w=8)
 flush()
 
+row("Handing back to Synapse (what still needs the Python worker, or main)")
+ts("Staging", "Events in federation_inbound_events_staging (ours and Synapse's) and the age of the oldest, at each minute's sweep. An age of minutes means nobody is processing that room: with write.fallback: synapse, a Synapse process that is not sweeping (see the nudges).",
+   [(f'max(goinbound_staging_events{{{G}}})', "staged events"),
+    (f'max(goinbound_staging_oldest_seconds{{{G}}})', "oldest (s)")], w=6)
+ts("PDU transactions write mode would leave to Synapse", "The plan shadow: each PDU transaction from an origin write mode does not serve, planned as write mode would. 'ok' would have been served here; any other reason is a transaction native mode would still proxy.",
+   [(f'sum by (reason) (rate(goinbound_pdu_plan_shadow_total{{{G}}}{R}))', "{{reason}}")], unit="ops", w=6, stack=True)
+ts("Events left or given up", "Staged events write mode deferred (left for Synapse) or, with write.fallback: none, gave up on and dropped after three attempts.",
+   [(f'sum by (outcome) (increase(goinbound_write_events_total{{{G}, outcome=~"deferred|error|given_up"}}{R}))', "{{outcome}}")], decimals=0, w=6)
+ts("Sweep nudges", "A copy of an answered transaction sent upstream on a deferral, so that Synapse starts its staged-events sweep. stored_answer is expected; other_answer means the upstream handled the copy instead of recognising it.",
+   [(f'sum by (outcome) (increase(goinbound_sweep_nudges_total{{{G}}}{R}))', "{{outcome}}")], decimals=0, w=6)
+flush()
+
 # ---------------------------------------------------------------- Synapse
 row("Synapse, for comparison")
 ts("Synapse: EDUs received over replication, by writer", "ReplicationFederationSendEduRestServlet on each Synapse instance: every EDU forwarded to it, from the Python worker or from us. Moving to native must not change this.",
