@@ -262,7 +262,13 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, body []byte, txn
 		// Synapse gives the authoritative 401, or accepts a request we could
 		// not verify -- a key server we cannot reach, say. Either way it is
 		// Synapse's answer to give.
-		h.proxyBody(w, r, body, reasonAuth, rec)
+		res := h.proxyBody(w, r, body, reasonAuth, rec)
+		// Synapse accepting what we refused is a request we could have
+		// served; say which origin and why, so it can be looked into.
+		claimed := federation.ParseXMatrixAuth(r.Header.Get("Authorization"))
+		h.log.Info().Str("origin", claimed.Origin).Str("key_id", string(claimed.KeyID)).
+			Str("ours", vr.Err.Err).Int("synapse_status", res.Status).
+			Msg("Authentication failed here; Synapse answered")
 		return
 	}
 	origin := vr.Origin
