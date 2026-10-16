@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/tidwall/gjson"
@@ -42,6 +43,14 @@ const (
 	qPruneStaged  = `DELETE FROM federation_inbound_events_staging WHERE room_id = $1 AND event_id = ANY($2)`
 	qStagedRooms  = `SELECT DISTINCT room_id FROM federation_inbound_events_staging`
 	qStagingAge   = `SELECT count(*), COALESCE(min(received_ts), 0) FROM federation_inbound_events_staging`
+	// qStagingUnattended is qStagingAge for rooms whose inbound lock nobody
+	// holds: no row, or one not renewed within the lock timeout.
+	qStagingUnattended = `
+	SELECT count(*), COALESCE(min(s.received_ts), 0)
+	FROM federation_inbound_events_staging s
+	WHERE NOT EXISTS (
+		SELECT 1 FROM worker_locks l
+		WHERE l.lock_name = $1 AND l.lock_key = s.room_id AND l.last_renewed_ts >= $2)`
 )
 
 // Staged is a staged event: event.get_dict() and its internal metadata, as
@@ -185,6 +194,17 @@ func stagedPrevs(js string, v1v2 bool) []string {
 func (d *DB) StagingAge(ctx context.Context) (n int64, oldestMS int64, err error) {
 	if err := d.pool.QueryRow(ctx, qStagingAge).Scan(&n, &oldestMS); err != nil {
 		return 0, 0, fmt.Errorf("inbound: staging age: %w", err)
+	}
+	return n, oldestMS, nil
+}
+
+// StagingUnattended is StagingAge for the events no process is handling:
+// their room's inbound lock is free or dead (not renewed for lockTimeout, as
+// Synapse judges it).
+func (d *DB) StagingUnattended(ctx context.Context) (n int64, oldestMS int64, err error) {
+	alive := time.Now().Add(-lockTimeout).UnixMilli()
+	if err := d.pool.QueryRow(ctx, qStagingUnattended, LockInboundPDU, alive).Scan(&n, &oldestMS); err != nil {
+		return 0, 0, fmt.Errorf("inbound: unattended staging: %w", err)
 	}
 	return n, oldestMS, nil
 }

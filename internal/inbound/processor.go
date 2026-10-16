@@ -198,6 +198,14 @@ func (p *Processor) sweep() {
 			stagedOldest.Set(0)
 		}
 	}
+	if n, oldest, err := p.db.StagingUnattended(p.ctx); err == nil {
+		unattendedEvents.Set(float64(n))
+		if oldest > 0 {
+			unattendedOldest.Set(time.Since(time.UnixMilli(oldest)).Seconds())
+		} else {
+			unattendedOldest.Set(0)
+		}
+	}
 	rooms, err := p.db.StagedRooms(p.ctx)
 	if err != nil {
 		if p.ctx.Err() == nil {
@@ -556,6 +564,14 @@ var (
 	stagedOldest = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "goinbound_staging_oldest_seconds",
 		Help: "Age of the oldest staged event at the last minute's sweep, 0 with none. Minutes means nobody is processing its room.",
+	})
+	unattendedEvents = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "goinbound_staging_unattended_events",
+		Help: "Staged events in rooms whose inbound lock no process holds (free, or not renewed for 2 minutes), at the last minute's sweep.",
+	})
+	unattendedOldest = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "goinbound_staging_unattended_oldest_seconds",
+		Help: "Age of the oldest staged event in a room no process holds, 0 with none. The alert signal: nobody is going to process it.",
 	})
 	pruned = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "goinbound_write_pruned_total",

@@ -181,9 +181,11 @@ ts("Origins in backoff marked as up", "write.mark_origins_up: an origin we had b
 flush()
 
 row("Handing back to Synapse (what still needs the Python worker, or main)")
-ts("Staging", "Events in federation_inbound_events_staging (ours and Synapse's) and the age of the oldest, at each minute's sweep. An age of minutes means nobody is processing that room: with write.fallback: synapse, a Synapse process that is not sweeping (see the nudges).",
+ts("Staging", "Events in federation_inbound_events_staging (ours and Synapse's) and the age of the oldest, at each minute's sweep; and the same for 'unattended' events, in rooms whose inbound lock no process holds. A busy room (Matrix HQ fetching missing prevs) can keep an event staged for many minutes while its holder works on it; an unattended one older than a minute or two means nobody will process it: with write.fallback: synapse, a Synapse process that is not sweeping (see the nudges).",
    [(f'max(goinbound_staging_events{{{G}}})', "staged events"),
-    (f'max(goinbound_staging_oldest_seconds{{{G}}})', "oldest (s)")], w=6)
+    (f'max(goinbound_staging_oldest_seconds{{{G}}})', "oldest (s)"),
+    (f'max(goinbound_staging_unattended_events{{{G}}})', "unattended events"),
+    (f'max(goinbound_staging_unattended_oldest_seconds{{{G}}})', "oldest unattended (s)")], w=6)
 ts("PDU transactions write mode would leave to Synapse", "The plan shadow: each PDU transaction from an origin write mode does not serve, planned as write mode would. 'ok' would have been served here; any other reason is a transaction native mode would still proxy.",
    [(f'sum by (reason) (rate(goinbound_pdu_plan_shadow_total{{{G}}}{R}))', "{{reason}}")], unit="ops", w=6, stack=True)
 ts("Events left or given up", "Staged events write mode deferred (left for Synapse) or, with write.fallback: none, gave up on and dropped after three attempts.",

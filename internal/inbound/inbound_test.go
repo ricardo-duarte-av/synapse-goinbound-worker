@@ -496,3 +496,38 @@ func TestFailedPulls(t *testing.T) {
 		t.Errorf("still backing off at the end: %v", b)
 	}
 }
+
+// Staged events count as unattended only where no process holds the room's
+// inbound lock, or its holder stopped renewing it.
+func TestStagingUnattended(t *testing.T) {
+	ctx := context.Background()
+	d := testDB(t, "goinbound-test")
+	for _, room := range []string{"!held:x", "!free:x", "!dead:x"} {
+		if err := d.Stage(ctx, "y", room, "$"+room[1:5], v1Event("$"+room[1:5], "", 1), []byte(`{}`)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	held, err := NewLocks(d).TryAcquire(ctx, LockInboundPDU, "!held:x")
+	if err != nil || held == nil {
+		t.Fatalf("lock %v %v", held, err)
+	}
+	defer held.Release(ctx)
+	dead, err := NewLocks(otherInstance(t, d, "py")).TryAcquire(ctx, LockInboundPDU, "!dead:x")
+	if err != nil || dead == nil {
+		t.Fatalf("lock %v %v", dead, err)
+	}
+	c := adminConn(t)
+	if _, err := c.Exec(ctx, `UPDATE worker_locks SET last_renewed_ts = $1 WHERE lock_key = '!dead:x'`,
+		time.Now().Add(-3*time.Minute).UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+
+	all, _, err := d.StagingAge(ctx)
+	if err != nil || all != 3 {
+		t.Fatalf("staged %d, %v", all, err)
+	}
+	n, oldest, err := d.StagingUnattended(ctx)
+	if err != nil || n != 2 || oldest == 0 {
+		t.Errorf("unattended %d (oldest %d), %v; want 2: the free room and the dead lock's", n, oldest, err)
+	}
+}

@@ -2327,7 +2327,7 @@
     {
       "type": "timeseries",
       "title": "Staging",
-      "description": "Events in federation_inbound_events_staging (ours and Synapse's) and the age of the oldest, at each minute's sweep. An age of minutes means nobody is processing that room: with write.fallback: synapse, a Synapse process that is not sweeping (see the nudges).",
+      "description": "Events in federation_inbound_events_staging (ours and Synapse's) and the age of the oldest, at each minute's sweep; and the same for 'unattended' events, in rooms whose inbound lock no process holds. A busy room (Matrix HQ fetching missing prevs) can keep an event staged for many minutes while its holder works on it; an unattended one older than a minute or two means nobody will process it: with write.fallback: synapse, a Synapse process that is not sweeping (see the nudges).",
       "id": 39,
       "datasource": {
         "type": "prometheus",
@@ -2396,6 +2396,28 @@
           "legendFormat": "oldest (s)",
           "range": true,
           "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "max(goinbound_staging_unattended_events{job=~\"$job\"})",
+          "legendFormat": "unattended events",
+          "range": true,
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "max(goinbound_staging_unattended_oldest_seconds{job=~\"$job\"})",
+          "legendFormat": "oldest unattended (s)",
+          "range": true,
+          "refId": "D"
         }
       ]
     },

@@ -32,7 +32,7 @@ Prometheus must scrape the worker first. Add this beside `gopro-worker` in
 | Shadow evaluation | What native mode would have done, and disagreements with Synapse. |
 | Write mode decisions | The decide check (write mode's decision against what Synapse did), its deferrals by reason, the policy server checks, and v2.1 set-order ties. |
 | Write mode | Only with modes.pdu canary or native: events by outcome, write latency, persister calls, device resyncs, queue pruning, origins marked as up. |
-| Handing back to Synapse | What still needs a Synapse process: staged events and the oldest one's age, the plan shadow's reasons, events deferred or given up, sweep nudges. |
+| Handing back to Synapse | What still needs a Synapse process: staged events and the oldest one's age (all, and in rooms no process holds), the plan shadow's reasons, events deferred or given up, sweep nudges. |
 | Synapse, for comparison | Synapse's own fed_send_edu counts per writer, which must not change across the move to native. The Python worker's /send rate, which should fall by ~96%. |
 | Database | Each named query's rate and latency, and ACL lookups by source. |
 | Process | CPU, memory and goroutines, beside the Python inbound worker's. |
@@ -44,13 +44,17 @@ New alert rule**). Neither is in the dashboard JSON.
 
 | Rule | Query | Condition | Evaluate | Summary |
 |---|---|---|---|---|
-| Staged inbound event stuck | `max(goinbound_staging_oldest_seconds{server_name="aguiarvieira.pt"})` | above 600 | every 1m, pending 5m | A staged inbound event has waited over 10 minutes: no process is handling its room. |
+| Staged inbound event unattended | `max(goinbound_staging_unattended_oldest_seconds{server_name="aguiarvieira.pt"})` | above 300 | every 1m, pending 5m | A staged inbound event has waited over 5 minutes in a room no process holds: nobody is going to process it. |
 | Write mode gave up on an event | `sum(increase(goinbound_write_events_total{server_name="aguiarvieira.pt", outcome="given_up"}[15m]))` | above 0 | every 1m, pending 0 | Write mode dropped an event it could not handle (write.fallback: none). The ERROR log line names it. |
 
 The first is the one that matters with `write.fallback: synapse`. The gauge is set
-at each minute's sweep and covers every staged event, Synapse's too. If it fires,
-a room's head event is waiting for a Synapse process that is not sweeping, most
-likely main once it is the only upstream. Check `goinbound_sweep_nudges_total`,
+at each minute's sweep and covers every staged event, Synapse's too, but only in
+rooms whose inbound lock is free or dead (not renewed for 2 minutes, Synapse's
+`_LOCK_TIMEOUT`). Do not alert on `goinbound_staging_oldest_seconds`: a process
+working through Matrix HQ's missing prevs keeps an event staged for many minutes
+(over 8 on 2026-10-16) while it holds the lock. If it fires, a room's head event
+is waiting for a Synapse process that is not sweeping, most likely main once it
+is the only upstream. Check `goinbound_sweep_nudges_total`,
 and find the room in the worker's log, or with:
 
 ```sql
