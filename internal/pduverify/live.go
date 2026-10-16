@@ -531,8 +531,14 @@ func (l *Live) check(j *job) {
 		}
 		l.recordResult(c.name, res)
 		ev := log.Debug()
-		if res.Outcome == OutcomeMismatch {
+		switch {
+		case res.Outcome == OutcomeMismatch || res.Outcome == OutcomeRaise || res.Outcome == OutcomeError:
+			// A raise is Synapse failing the event; when Synapse persisted
+			// it anyway, it is as much a disagreement as a mismatch.
 			ev = log.Warn()
+		case c.name == "decide" && strings.HasPrefix(res.Reason, "deferred: ") && res.Reason != "deferred: missing prevs":
+			// What native mode would still leave to Synapse.
+			ev = log.Info()
 		}
 		ev.Str("check", c.name).Str("outcome", res.Outcome).Str("reason", res.Reason).
 			Str("type", res.Type).Bool("synapse_rejected", res.SynapseRej).Bool("our_rejected", res.OurRej).
