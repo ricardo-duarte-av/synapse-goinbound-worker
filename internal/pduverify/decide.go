@@ -661,8 +661,26 @@ func (s *Verifier) CheckDecision(ctx context.Context, id string, d *Decision, sn
 	if err != nil {
 		return res.fail(OutcomeError, err.Error())
 	}
+	softRaced := false
 	if !ev.Rejected && soft != d.SoftFailed {
-		diffs = append(diffs, fmt.Sprintf("soft_failed: ours %v, Synapse %v", d.SoftFailed, soft))
+		// Soft failure is judged against the room's current state when the
+		// event is handled, not when it arrived: an event of the room
+		// persisted between our snapshot and this one (a kick sent in the
+		// same transaction, say) may decide it. As the soft_fail check.
+		raced := false
+		if snap != nil && se.StreamOrdering > 0 {
+			n, err := s.st.RoomEventsBetween(ctx, ev.RoomID, snap.MaxStream, se.StreamOrdering, id)
+			if err != nil {
+				return res.fail(OutcomeError, err.Error())
+			}
+			raced = n > 0
+		}
+		if raced {
+			softRaced = true
+			res.StateDiff = append(res.StateDiff, fmt.Sprintf("soft_failed not compared: race (ours %v, Synapse %v)", d.SoftFailed, soft))
+		} else {
+			diffs = append(diffs, fmt.Sprintf("soft_failed: ours %v, Synapse %v", d.SoftFailed, soft))
+		}
 	}
 
 	// The group before: the group itself for a non-state event, the after
@@ -721,7 +739,11 @@ func (s *Verifier) CheckDecision(ctx context.Context, id string, d *Decision, sn
 		}
 	}
 	// The fed_send_events entry, with Synapse's groups.
-	if staged != nil && len(diffs) == 0 {
+	if staged != nil && len(diffs) == 0 && softRaced {
+		// Its internal metadata carries the soft-fail verdict.
+		res.PushDiff = append(res.PushDiff, "entry not compared: soft_failed raced")
+	}
+	if staged != nil && len(diffs) == 0 && !softRaced {
 		// For a rejected state event Synapse's after group is not
 		// recorded anywhere; compareEntry checks the group it maps to.
 		after := own
@@ -743,6 +765,11 @@ func (s *Verifier) CheckDecision(ctx context.Context, id string, d *Decision, sn
 	}
 	if len(diffs) > 0 {
 		res.Outcome, res.Reason, res.StateDiff = OutcomeMismatch, "decide", diffs
+		return res
+	}
+	if softRaced {
+		// Everything else agreed; the soft-fail verdict could not be judged.
+		res.Outcome, res.Reason = OutcomeSkipped, "race"
 		return res
 	}
 	res.Outcome = OutcomeMatch
