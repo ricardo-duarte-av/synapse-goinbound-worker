@@ -56,6 +56,17 @@ type Processor struct {
 	// deferred is, per room, the staged event left for Synapse's worker,
 	// so we do not take the room back from it every minute.
 	deferred map[string]deferral
+	// noFallback is write.fallback: none. There is no Synapse worker to
+	// leave an event to, so a deferred event is retried at the next sweep,
+	// and after fallbackAttempts dropped (attempts, by event ID).
+	noFallback bool
+	attempts   map[string]attempt
+	spacing    time.Duration
+}
+
+type attempt struct {
+	n    int
+	last time.Time
 }
 
 type deferral struct {
@@ -67,14 +78,62 @@ type deferral struct {
 // sweeps its staging every minute, and should have taken it by then.
 const deferralTTL = 5 * time.Minute
 
+// fallbackAttempts is how many times, with write.fallback: none, an event is
+// tried before it is dropped. The retries are for what may pass (a database
+// or persister error); what is certain to be deferred again (a case not
+// ported) is dropped on the last one, as Synapse drops an event it fails to
+// handle.
+const fallbackAttempts = 3
+
+// fallbackSpacing is the least time between two counted attempts: a room's
+// head is retried whenever an event arrives, and a persister restart must
+// not use up an event's attempts in seconds.
+const fallbackSpacing = 2 * time.Minute
+
 // NewProcessor builds a processor. Start begins the one-minute sweep.
 func NewProcessor(db *DB, d Deciding, p Persisting, r Reading, server string, log zerolog.Logger) *Processor {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Processor{
 		db: db, locks: NewLocks(db), decide: d, persist: p, read: r,
 		cache: pduverify.NewStateCache(), server: server, log: log,
-		ctx: ctx, cancel: cancel, deferred: map[string]deferral{},
+		ctx: ctx, cancel: cancel, deferred: map[string]deferral{}, attempts: map[string]attempt{}, spacing: fallbackSpacing,
 	}
+}
+
+// WithoutFallback is write.fallback: none: no Synapse worker takes events
+// this processor defers.
+func (p *Processor) WithoutFallback() { p.noFallback = true }
+
+// giveUp counts a deferral of eventID, saying whether to drop the event now.
+func (p *Processor) giveUp(eventID string) bool {
+	if !p.noFallback {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := time.Now()
+	a := p.attempts[eventID]
+	if a.n > 0 && now.Sub(a.last) < p.spacing {
+		return false
+	}
+	a.n++
+	a.last = now
+	if a.n < fallbackAttempts {
+		p.attempts[eventID] = a
+		return false
+	}
+	delete(p.attempts, eventID)
+	return true
+}
+
+// handledEvent forgets an event's earlier deferrals.
+func (p *Processor) handledEvent(eventID string) {
+	if !p.noFallback {
+		return
+	}
+	p.mu.Lock()
+	delete(p.attempts, eventID)
+	p.mu.Unlock()
 }
 
 // EnableMissingEvents lets the processor fetch missing prev events itself,
@@ -164,7 +223,12 @@ func (p *Processor) isDeferred(room string) bool {
 	if !ok {
 		return false
 	}
-	if time.Since(d.at) > deferralTTL {
+	ttl := deferralTTL
+	if p.noFallback {
+		// Nobody else will take it: try again at the next sweep.
+		ttl = 0
+	}
+	if time.Since(d.at) > ttl {
 		p.mu.Lock()
 		delete(p.deferred, room)
 		p.mu.Unlock()
@@ -224,11 +288,20 @@ func (p *Processor) processRoom(room string, lock *Lock, latestOrigin, latestID 
 		next.EventID = id
 
 		outcome := p.handle(ctx, room, rv, next)
+		if outcome == outcomeDefer && ctx.Err() == nil && p.giveUp(id) {
+			// _process_incoming_pdus_in_room_inner: an event that fails is
+			// logged and unstaged.
+			p.log.Error().Str("event_id", id).Str("room_id", room).Str("origin", next.Origin).Int("attempts", fallbackAttempts).
+				Msg("Write mode: dropping an event it could not handle, as Synapse drops an event it fails to handle (write.fallback: none)")
+			handled.WithLabelValues("given_up").Inc()
+			outcome = outcomeDone
+		}
 		if outcome == outcomeDefer {
 			p.deferRoom(room, next.Origin, id)
 			release(lock)
 			return
 		}
+		p.handledEvent(id)
 		if ts, ok, err := p.db.Unstage(ctx, next.Origin, id); err == nil && ok {
 			processTime.Observe(time.Since(time.UnixMilli(ts)).Seconds())
 		}

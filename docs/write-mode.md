@@ -128,3 +128,20 @@ whichever holds the lock processes everything staged in it.
 
 Gates, in order: local tests against a Synapse schema; the A/B replay; a
 canary of a few origins with the reverse verification; native.
+
+### Retiring the Python worker
+
+While the Python worker runs, `write.fallback: synapse`: a staged event write
+mode is not certain to handle as Synapse would stays staged, and Synapse's
+one-minute sweep takes it with the room's lock. Without that worker, such an
+event would stay at the head of its room's queue, and every later event in
+the room would wait behind it. `write.fallback: none` is for then: the event
+is tried three times, at least two minutes apart (a persister restart must not
+use up its attempts), then dropped and logged at ERROR
+(`goinbound_write_events_total{outcome="given_up"}`). That is Synapse's own
+rule: `_process_incoming_pdus_in_room_inner` logs any exception and unstages
+the event. In the week to 2026-10-16 the only deferrals were for missing prevs,
+which write mode fetches itself.
+
+The transactions write mode leaves to Synapse (auth failures, malformed
+bodies, `pdu_*` reasons) still need their own answers before then.

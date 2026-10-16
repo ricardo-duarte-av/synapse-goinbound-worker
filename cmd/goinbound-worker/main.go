@@ -297,6 +297,10 @@ func buildHandler(ctx context.Context, cfg *config.Config, up *proxy.Proxy, log 
 			return nil, noop, err
 		}
 		proc = inbound.NewProcessor(wdb, pv, persister{repl, hs.Writers}, pst, hs.ServerName, log)
+		if cfg.Write.Fallback == config.FallbackNone {
+			proc.WithoutFallback()
+			log.Warn().Msg("write.fallback is none: an event write mode cannot handle is retried, then dropped, as Synapse drops one it fails to handle")
+		}
 		// Keys Synapse does not hold yet, found as its Keyring would.
 		keys := keyring.New(hs.ServerName, pst.VerifyKeys, notaries)
 		if cfg.Write.FetchesMissingEvents() {

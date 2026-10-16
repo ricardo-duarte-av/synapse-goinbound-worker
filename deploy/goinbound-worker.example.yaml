@@ -45,6 +45,13 @@ modes:
 #   # An event whose prev events are missing: defer (leave it staged for
 #   # Synapse's worker) or fetch (from the origin, as Synapse does).
 #   missing_events: defer
+#   # Who takes a staged event write mode is not certain to handle as Synapse
+#   # would (required with modes.pdu canary:N or native): synapse (leave it
+#   # staged for Synapse's inbound worker) or none (there is no such worker:
+#   # it is retried three times, at least two minutes apart, then dropped and
+#   # logged, as Synapse drops an event it fails to handle; needs
+#   # missing_events: fetch).
+#   fallback: synapse
 #   # An origin in backoff that sends us a transaction is alive: reset it,
 #   # invalidate every process's cached timings and publish REMOTE_SERVER_UP,
 #   # as Synapse's worker does (on homeserver.yaml's redis). False proxies

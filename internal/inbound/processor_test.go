@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
 
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pdu"
@@ -181,6 +182,65 @@ func TestProcessorDefersAndKeepsTheQueue(t *testing.T) {
 	}
 }
 
+// With write.fallback: none, nobody else takes a deferred event: it is
+// retried at each sweep, then dropped, and the room's queue moves on.
+func TestProcessorWithoutFallbackDropsAfterAttempts(t *testing.T) {
+	ctx := context.Background()
+	d := testDB(t, "goinbound-test")
+	p := NewProcessor(d, &fakeDecide{}, &fakePersist{}, fakeRead{}, "x", zerolog.Nop())
+	p.WithoutFallback()
+	p.spacing = 0
+	defer p.Close()
+	c := adminConn(t)
+
+	if err := p.Received(ctx, "y", "!r:x", "$1", v1Event("$1", "defer", 1), []byte(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Received(ctx, "y", "!r:x", "$2", v1Event("$2", "ignore", 2), []byte(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	// Each attempt ends with the room remembered as deferred, or with the
+	// queue drained.
+	attempted := func() {
+		waitFor(t, "attempt", func() bool {
+			p.mu.Lock()
+			_, deferred := p.deferred["!r:x"]
+			delete(p.deferred, "!r:x")
+			p.mu.Unlock()
+			return deferred || stagedCount(t, c) == 0
+		})
+	}
+	attempted()
+	for i := 0; i < 2*fallbackAttempts && stagedCount(t, c) > 0; i++ {
+		p.sweep()
+		attempted()
+	}
+	waitFor(t, "queue drained", func() bool { return stagedCount(t, c) == 0 })
+	if len(p.attempts) != 0 {
+		t.Errorf("attempts left: %v", p.attempts)
+	}
+}
+
+// Attempts closer together than the spacing count once.
+func TestFallbackAttemptsAreSpaced(t *testing.T) {
+	p := &Processor{noFallback: true, attempts: map[string]attempt{}, spacing: time.Hour}
+	for i := 0; i < 10; i++ {
+		if p.giveUp("$e") {
+			t.Fatal("gave up inside the spacing")
+		}
+	}
+	if p.attempts["$e"].n != 1 {
+		t.Errorf("%d attempts counted, want 1", p.attempts["$e"].n)
+	}
+	p.spacing = 0
+	if p.giveUp("$e") || !p.giveUp("$e") {
+		t.Error("did not give up on the third counted attempt")
+	}
+	if (&Processor{attempts: map[string]attempt{}}).giveUp("$e") {
+		t.Error("gave up with a fallback")
+	}
+}
+
 func TestProcessorLeavesAFailedPersistStaged(t *testing.T) {
 	ctx := context.Background()
 	d := testDB(t, "goinbound-test")
@@ -201,4 +261,13 @@ func TestProcessorLeavesAFailedPersistStaged(t *testing.T) {
 	if _, id, ok, _ := d.NextStagedID(ctx, "!r:x"); !ok || id != "$1" {
 		t.Errorf("event not left staged: %s %v", id, ok)
 	}
+}
+
+func stagedCount(t *testing.T, c *pgx.Conn) int {
+	t.Helper()
+	var n int
+	if err := c.QueryRow(context.Background(), `SELECT count(*) FROM federation_inbound_events_staging`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
 }

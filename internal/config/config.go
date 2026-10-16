@@ -393,6 +393,24 @@ func (c *Config) validate() error {
 		return fmt.Errorf("modes.pdu is %s, so modes.edu must be canary:%d or more, or native: "+
 			"a write-mode origin's every transaction is ours", c.Modes.PDU, c.Modes.PDU.CanaryPercent)
 	}
+	if c.Modes.PDU.ServesNatively() {
+		switch c.Write.Fallback {
+		case "":
+			return fmt.Errorf("write.fallback is required with modes.pdu %s: synapse (an event write mode is not "+
+				"certain about stays staged for Synapse's inbound worker) or none (no such worker: it is retried, "+
+				"then dropped, as Synapse drops an event it fails to handle)", c.Modes.PDU)
+		case FallbackSynapse:
+		case FallbackNone:
+			if !c.Write.FetchesMissingEvents() {
+				return fmt.Errorf("write.fallback is none, so nothing else fetches missing prev events: " +
+					"it needs write.missing_events: fetch")
+			}
+		default:
+			return fmt.Errorf("write.fallback is %q; it must be synapse or none", c.Write.Fallback)
+		}
+	} else if c.Write.Fallback != "" {
+		return fmt.Errorf("write.fallback is set, but modes.pdu is %s; it applies to write mode only", c.Modes.PDU)
+	}
 	if m := c.Write.MissingEvents; m != "" && m != "defer" && m != "fetch" {
 		return fmt.Errorf("write.missing_events is %q; it must be defer or fetch", m)
 	}
@@ -439,6 +457,12 @@ type Write struct {
 	// the destinations reset, its invalidation on the caches stream under
 	// instance_name, and REMOTE_SERVER_UP. False proxies them.
 	MarkOriginsUp bool `yaml:"mark_origins_up"`
+	// Fallback is who takes a staged event write mode is not certain to
+	// handle as Synapse would: "synapse" leaves it staged for Synapse's
+	// inbound worker; "none", for when there is no such worker, retries it
+	// and then drops it, logged, as Synapse drops an event it fails to
+	// handle (federation_server.py, _process_incoming_pdus_in_room_inner).
+	Fallback string `yaml:"fallback"`
 	// TestDropPDUs makes a gap on purpose, to test missing_events: fetch
 	// against a server we control. Synapse has nothing like it.
 	TestDropPDUs *TestDrop `yaml:"test_drop_pdus"`
@@ -451,6 +475,12 @@ type TestDrop struct {
 	Room   string `yaml:"room"`
 	Count  int    `yaml:"count"`
 }
+
+// Values of write.fallback.
+const (
+	FallbackSynapse = "synapse"
+	FallbackNone    = "none"
+)
 
 // FetchesMissingEvents says write.missing_events is fetch.
 func (w Write) FetchesMissingEvents() bool { return w.MissingEvents == "fetch" }

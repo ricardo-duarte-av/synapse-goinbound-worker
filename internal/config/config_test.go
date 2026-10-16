@@ -133,7 +133,7 @@ func TestPDUShadowIsAllowed(t *testing.T) {
 }
 
 func TestWriteMode(t *testing.T) {
-	w := "write:\n  instance_name: goinbound-worker\n"
+	w := "write:\n  instance_name: goinbound-worker\n  fallback: synapse\n"
 	ok := map[string]string{
 		"pdu canary under edu canary": base + w + "modes:\n  edu: canary:10\n  pdu: canary:5\n",
 		"pdu canary under edu native": base + w + "modes:\n  edu: native\n  pdu: canary:5\n",
@@ -150,7 +150,7 @@ func TestWriteMode(t *testing.T) {
 		}
 	}
 	bad := map[string]string{
-		"no instance name":        base + "modes:\n  edu: native\n  pdu: native\n",
+		"no instance name":        base + "write:\n  fallback: synapse\n" + "modes:\n  edu: native\n  pdu: native\n",
 		"pdu canary over edu's":   base + w + "modes:\n  edu: canary:5\n  pdu: canary:10\n",
 		"pdu canary under shadow": base + w + "modes:\n  edu: shadow\n  pdu: canary:5\n",
 		"pdu native, edu canary":  base + w + "modes:\n  edu: canary:100\n  pdu: native\n",
@@ -163,7 +163,7 @@ func TestWriteMode(t *testing.T) {
 }
 
 func TestWriteOrigins(t *testing.T) {
-	w := "write:\n  instance_name: goinbound-worker\n  origins: [daedric.net]\n"
+	w := "write:\n  instance_name: goinbound-worker\n  fallback: synapse\n  origins: [daedric.net]\n"
 	cfg, err := parse([]byte(base + w + "modes:\n  edu: canary:5\n  pdu: canary:0\n"))
 	if err != nil || len(cfg.Write.Origins) != 1 {
 		t.Fatalf("%v %v", cfg, err)
@@ -176,7 +176,7 @@ func TestWriteOrigins(t *testing.T) {
 // A gap may be made only for a write origin, and only to test fetching.
 func TestTestDropPDUs(t *testing.T) {
 	modes := "modes:\n  edu: canary:5\n  pdu: canary:0\n"
-	w := "write:\n  instance_name: goinbound-worker\n  origins: [daedric.net]\n"
+	w := "write:\n  instance_name: goinbound-worker\n  fallback: synapse\n  origins: [daedric.net]\n"
 	drop := "  test_drop_pdus: {origin: %s, room: \"!r:x\", count: %d}\n"
 	cfg, err := parse([]byte(base + w + "  missing_events: fetch\n" + fmt.Sprintf(drop, "daedric.net", 3) + modes))
 	if err != nil || cfg.Write.TestDropPDUs == nil || cfg.Write.TestDropPDUs.Count != 3 {
@@ -188,6 +188,32 @@ func TestTestDropPDUs(t *testing.T) {
 		"no count":           w + "  missing_events: fetch\n" + fmt.Sprintf(drop, "daedric.net", 0),
 	} {
 		if _, err := parse([]byte(base + y + modes)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+// write.fallback must be said whenever write mode is on, and none needs
+// write mode to fetch missing prev events itself.
+func TestWriteFallback(t *testing.T) {
+	modes := "modes:\n  edu: native\n  pdu: native\n"
+	w := "write:\n  instance_name: goinbound-worker\n"
+	for name, y := range map[string]string{
+		"synapse":             w + "  fallback: synapse\n" + modes,
+		"none, with fetch":    w + "  fallback: none\n  missing_events: fetch\n" + modes,
+		"unset outside write": "modes:\n  edu: native\n  pdu: shadow\n",
+	} {
+		if _, err := parse([]byte(base + y)); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	for name, y := range map[string]string{
+		"unset":                 w + modes,
+		"unknown":               w + "  fallback: python\n" + modes,
+		"none without fetching": w + "  fallback: none\n" + modes,
+		"set outside write":     w + "  fallback: synapse\n" + "modes:\n  edu: native\n  pdu: shadow\n",
+	} {
+		if _, err := parse([]byte(base + y)); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}
