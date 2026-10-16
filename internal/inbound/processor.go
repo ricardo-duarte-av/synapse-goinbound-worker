@@ -319,14 +319,17 @@ func (p *Processor) handle(ctx context.Context, room string, rv *pdu.RoomVersion
 	}
 	d, err := p.decide.Decide(ctx, in)
 	if err == nil && d.Defer == "missing prevs" && p.missing != nil {
-		drop, merr := p.missingPrevs(ctx, s.Origin, rv, d.Event)
+		drop, still, merr := p.missingPrevs(ctx, s.Origin, rv, d.Event)
 		switch {
 		case merr != nil:
 			log.Info().Err(merr).Msg("Write mode: leaving an event with missing prevs to Synapse")
 			handled.WithLabelValues("deferred").Inc()
 			return outcomeDefer
 		case drop != "":
-			log.Warn().Str("why", drop).Msg("Rejecting: failed to fetch prev events")
+			// Synapse's "Rejecting: failed to fetch %d prev events: %s", with
+			// the origin asked.
+			log.Warn().Str("origin", s.Origin).Int("count", len(still)).Str("prev_events", shortstr(still)).
+				Str("why", drop).Msg("Rejecting: failed to fetch prev events")
 			handled.WithLabelValues("dropped").Inc()
 			return outcomeDone
 		}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/fedfetch"
@@ -45,29 +46,43 @@ type MissingDeps struct {
 const notDivulging = "Your server isn't divulging details about prev_events referenced in this event."
 
 // missingPrevs fetches what on_receive_pdu fetches for an event whose prevs
-// are missing. drop is set when the event must then be dropped; otherwise
-// the prevs are in the timeline and the event can be decided again.
-func (p *Processor) missingPrevs(ctx context.Context, origin string, rv *pdu.RoomVersion, ev *pdu.Event) (drop string, err error) {
+// are missing. drop is set when the event must then be dropped, with the
+// prevs still missing; otherwise the prevs are in the timeline and the event
+// can be decided again.
+func (p *Processor) missingPrevs(ctx context.Context, origin string, rv *pdu.RoomVersion, ev *pdu.Event) (drop string, still []string, err error) {
 	m := p.missing
 	md, err := m.Store.MinDepth(ctx, ev.RoomID)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if md != nil && ev.Depth > *md {
 		if err := p.getMissingEvents(ctx, origin, rv, ev, *md); err != nil {
-			return "", err
+			return "", nil, err
 		}
 	}
 	seen, err := m.Store.InTimeline(ctx, ev.PrevEvents)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
-	for _, prev := range ev.PrevEvents {
+	for _, prev := range uniqueStrings(ev.PrevEvents) {
 		if !seen[prev] {
-			return notDivulging, nil
+			still = append(still, prev)
 		}
 	}
-	return "", nil
+	if len(still) > 0 {
+		return notDivulging, still, nil
+	}
+	return "", nil, nil
+}
+
+// shortstr is like Synapse's shortstr, for a log line: at most five
+// items, then "...".
+func shortstr(items []string) string {
+	const maxItems = 5
+	if len(items) <= maxItems {
+		return strings.Join(items, ", ")
+	}
+	return strings.Join(items[:maxItems], ", ") + ", ..."
 }
 
 // getMissingEvents is _get_missing_events_for_pdu.
