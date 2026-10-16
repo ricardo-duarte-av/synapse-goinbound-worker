@@ -731,3 +731,41 @@ func TestWriteOriginsAreServedAtCanaryZero(t *testing.T) {
 		t.Errorf("other origin: proxied %d of 2", r.up.count())
 	}
 }
+
+// The sweep nudge sends the upstream an exact copy of the last transaction
+// answered and stored here, at most once a minute, and nothing before one is.
+func TestNudgeSweepSendsACopyOfAnAnsweredTransaction(t *testing.T) {
+	r, _ := pduRig(t, config.Mode{Kind: config.ModeNative}, config.Mode{Kind: config.ModeNative}, &fakePDUServer{})
+	r.h.NudgeSweep()
+	if r.up.count() != 0 {
+		t.Fatal("a nudge was sent with no answered transaction")
+	}
+	r.h.nudge.next.Store(0)
+
+	if rec := send(t, r.h, "remote.example", "t1", eduOnly); rec.Code != 200 || r.up.count() != 0 {
+		t.Fatalf("not answered here: %d, proxied %d", rec.Code, r.up.count())
+	}
+	r.h.NudgeSweep()
+	waitFor(t, func() bool { return r.up.count() == 1 })
+	r.up.mu.Lock()
+	body, uri := r.up.bodies[0], r.up.uris[0]
+	r.up.mu.Unlock()
+	if body != eduOnly || !strings.HasSuffix(uri, "/send/t1") {
+		t.Errorf("sent %s %s, want a copy of t1", uri, body)
+	}
+
+	r.h.NudgeSweep()
+	time.Sleep(50 * time.Millisecond)
+	if r.up.count() != 1 {
+		t.Errorf("%d nudges inside a minute, want 1", r.up.count())
+	}
+}
+
+func TestSameJSON(t *testing.T) {
+	if !sameJSON([]byte(`{"pdus":{"$a":{"error":"é"}}}`), []byte(`{"pdus": {"$a": {"error": "é"}}}`)) {
+		t.Error("the same answer, encoded differently, did not compare equal")
+	}
+	if sameJSON([]byte(`{"pdus":{}}`), []byte(`{"pdus":{"$a":{}}}`)) {
+		t.Error("different answers compared equal")
+	}
+}

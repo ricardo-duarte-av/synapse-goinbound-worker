@@ -24,6 +24,11 @@ things that are not derivable from the code.
 - **The goal is retiring the Python inbound worker(s)** (operator,
   2026-10-14). "Keep PDUs on Python" is not an end state, so the PDU path,
   remote fetching included, must eventually be Go's.
+- **Main is the last resort, always** (operator, 2026-10-16). It can do
+  anything a worker does, but it is single-threaded and busy, so it gets as
+  little as possible. Retiring the inbound worker can mean pointing the
+  upstream at main with `write.fallback: synapse`; the sweep nudge
+  (`internal/txn/nudge.go`) makes sure main sweeps what we defer.
 - **Whatever a persister or writer can persist, it persists.** Writes go over
   replication (`fed_send_events`, `fed_send_edu`). Only what Synapse's own
   inbound worker writes directly (staging, `worker_locks`, state groups,

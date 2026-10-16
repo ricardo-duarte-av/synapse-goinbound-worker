@@ -62,6 +62,8 @@ type Processor struct {
 	noFallback bool
 	attempts   map[string]attempt
 	spacing    time.Duration
+	// onDefer is told whenever an event is left to Synapse.
+	onDefer func()
 }
 
 type attempt struct {
@@ -99,6 +101,11 @@ func NewProcessor(db *DB, d Deciding, p Persisting, r Reading, server string, lo
 		ctx: ctx, cancel: cancel, deferred: map[string]deferral{}, attempts: map[string]attempt{}, spacing: fallbackSpacing,
 	}
 }
+
+// OnDefer sets what is called whenever an event is left staged for Synapse
+// (write.fallback: synapse): the sweep nudge, so that some Synapse process is
+// sweeping staged events.
+func (p *Processor) OnDefer(f func()) { p.onDefer = f }
 
 // WithoutFallback is write.fallback: none: no Synapse worker takes events
 // this processor defers.
@@ -348,6 +355,9 @@ func (p *Processor) deferRoom(room, origin, eventID string) {
 	p.mu.Lock()
 	p.deferred[room] = deferral{origin: origin, eventID: eventID, at: time.Now()}
 	p.mu.Unlock()
+	if p.onDefer != nil && !p.noFallback {
+		p.onDefer()
+	}
 }
 
 // stagedEventID is the event ID make_event_from_dict gives the staged JSON.

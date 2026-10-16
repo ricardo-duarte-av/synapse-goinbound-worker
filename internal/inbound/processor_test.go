@@ -271,3 +271,35 @@ func stagedCount(t *testing.T, c *pgx.Conn) int {
 	}
 	return n
 }
+
+// A deferral under write.fallback: synapse calls OnDefer (the sweep nudge);
+// under none nobody is nudged, as nobody takes the event.
+func TestProcessorNudgesOnDefer(t *testing.T) {
+	ctx := context.Background()
+	for _, none := range []bool{false, true} {
+		d := testDB(t, "goinbound-test")
+		p := NewProcessor(d, &fakeDecide{}, &fakePersist{}, fakeRead{}, "x", zerolog.Nop())
+		var mu sync.Mutex
+		calls := 0
+		p.OnDefer(func() { mu.Lock(); calls++; mu.Unlock() })
+		if none {
+			p.WithoutFallback()
+		}
+		if err := p.Received(ctx, "y", "!r:x", "$1", v1Event("$1", "defer", 1), []byte(`{}`)); err != nil {
+			t.Fatal(err)
+		}
+		waitFor(t, "deferred", func() bool {
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			_, ok := p.deferred["!r:x"]
+			return ok
+		})
+		p.Close()
+		mu.Lock()
+		got := calls
+		mu.Unlock()
+		if want := map[bool]int{false: 1, true: 0}[none]; got != want {
+			t.Errorf("fallback none %v: %d nudges, want %d", none, got, want)
+		}
+	}
+}

@@ -143,5 +143,22 @@ rule: `_process_incoming_pdus_in_room_inner` logs any exception and unstages
 the event. In the week to 2026-10-16 the only deferrals were for missing prevs,
 which write mode fetches itself.
 
-The transactions write mode leaves to Synapse (auth failures, malformed
-bodies, `pdu_*` reasons) still need their own answers before then.
+Main is the last resort (operator, 2026-10-16): it serves the `federation`
+resource on `/var/sockets/nginx/av-synapse-main.sock` and can do everything the
+inbound worker does, though it is single-threaded and busy, so it should get
+as little as possible. Retiring the inbound worker can therefore be: point the
+upstream at main, keep `write.fallback: synapse`. Main then answers what we
+proxy (auth failures, about ten an hour; malformed bodies; `pdu_*` reasons)
+and takes what we defer.
+
+One catch, which the sweep nudge covers: a Synapse process starts
+`_handle_old_staged_events` only once it has received a transaction
+(`on_incoming_transaction`, `federation_server.py:306`). Main, getting almost
+none, might never start it, and an event we defer would wait. So on every
+deferral (at most once a minute) we send the upstream a copy of the last
+transaction we answered and stored. Synapse answers it from
+`received_transactions` before touching its PDUs or EDUs, as it answers the
+sender's own retry, and the copy authenticates, as X-Matrix signs no
+timestamp. The sweep starts, nothing else happens.
+`goinbound_sweep_nudges_total{outcome}`: `stored_answer` is the expected one;
+`other_answer` means the upstream handled the copy instead of recognising it.

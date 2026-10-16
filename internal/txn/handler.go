@@ -147,6 +147,8 @@ type Handler struct {
 	log            zerolog.Logger
 	// planSem bounds the plan shadow (planDry).
 	planSem chan struct{}
+	// nudge keeps the copy NudgeSweep sends.
+	nudge nudger
 }
 
 // responseCacheTTL is Synapse's _transaction_resp_cache timeout.
@@ -364,6 +366,9 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, body []byte, txn
 		sctx, scancel := context.WithTimeout(context.WithoutCancel(r.Context()), 10*time.Second)
 		if err := h.responses.SetTxnResponse(sctx, origin, txnID, ans.status, ans.body); err != nil {
 			h.log.Warn().Err(err).Str("origin", origin).Msg("Could not store a transaction answer")
+		} else {
+			// Stored, so Synapse answers a copy from received_transactions.
+			h.nudge.remember(r, body, ans.body)
 		}
 		scancel()
 	}

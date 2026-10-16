@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -289,6 +290,7 @@ func buildHandler(ctx context.Context, cfg *config.Config, up *proxy.Proxy, log 
 		opts.PDUs = pduSink{live}
 	}
 	var proc *inbound.Processor
+	var handler atomic.Pointer[txn.Handler]
 	var wdb *inbound.DB
 	if cfg.Modes.PDU.ServesNatively() {
 		wdb, err = openWriteDatabase(ctx, cfg, hs, log)
@@ -338,6 +340,13 @@ func buildHandler(ctx context.Context, cfg *config.Config, up *proxy.Proxy, log 
 		fd := inbound.NewFrontDoor(deps)
 		opts.PDUMode, opts.PDUServer, opts.Responses = cfg.Modes.PDU, frontDoor{fd}, wdb
 		opts.WriteOrigins = cfg.Write.Origins
+		// An event left to Synapse needs a Synapse process sweeping staged
+		// events; the handler (built below) nudges the upstream into it.
+		proc.OnDefer(func() {
+			if h := handler.Load(); h != nil {
+				h.NudgeSweep()
+			}
+		})
 		proc.Start()
 		log.Warn().Str("mode", cfg.Modes.PDU.String()).Str("instance", cfg.Write.InstanceName).Strs("origins", cfg.Write.Origins).
 			Msg("Write mode on: PDUs of the selected origins are persisted here")
@@ -360,6 +369,7 @@ func buildHandler(ctx context.Context, cfg *config.Config, up *proxy.Proxy, log 
 		log.Info().Msg("write.mark_origins_up is off: transactions from origins in backoff go to Synapse's worker")
 	}
 	h := txn.NewHandler(opts)
+	handler.Store(h)
 	return h, func() {
 		h.Close()
 		if bus != nil {
