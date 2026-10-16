@@ -15,6 +15,10 @@ things that are not derivable from the code.
   the 410k EDUs a day are dropped on arrival.
 - The `inbound-federation` Prometheus job also scrapes `matrixbridg.es`. Always
   filter by `server_name="aguiarvieira.pt"`.
+  That is Synapse's label. goinbound's own series (job `goinbound-worker`) carry
+  `job`, `instance` and `deployment="aguiarvieira.pt"`, and no `server_name`: a
+  `server_name` filter on them returns no data (an alert written that way fired
+  on no data, 2026-10-16).
 - Synapse source: `/home/daedric/synapse`. Sibling workers whose code was
   reused: `/home/daedric/synapse-gopro-worker` (fedauth, proxy, ACL) and
   `/home/daedric/synapse-gofederation-worker` (synapsecfg).
