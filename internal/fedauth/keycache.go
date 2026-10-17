@@ -62,6 +62,16 @@ func (c *layeredCache) LoadKeys(serverName string) (*federation.ServerKeyRespons
 		return nil, nil
 	}
 
+	// Synapse keeps a row per key ID, each holding the whole response, and
+	// for a key in old_verify_keys its ts_valid_until_ms is that key's
+	// expired_ts, not the response's valid_until_ts. So the column says
+	// nothing of whether the response is still valid: an old key's row with
+	// a far expired_ts can hold a response that expired days ago (2026-10-17:
+	// nexy7574.co.uk, spiritcroc.de, refused here while Synapse accepted
+	// them). Each response is judged by its own valid_until_ts, and the
+	// longest-valid one used.
+	now := time.Now()
+	var best *federation.ServerKeyResponse
 	for _, row := range rows {
 		var resp federation.ServerKeyResponse
 		// Unmarshalling is what populates the raw bytes that self-signature
@@ -75,16 +85,26 @@ func (c *layeredCache) LoadKeys(serverName string) (*federation.ServerKeyRespons
 			// server's keys be served for another.
 			continue
 		}
+		if !now.Before(resp.ValidUntilTS.Time) {
+			continue
+		}
+		if best != nil && !resp.ValidUntilTS.Time.After(best.ValidUntilTS.Time) {
+			continue
+		}
 		if err := resp.VerifySelfSignature(); err != nil {
 			c.log.Debug().Err(err).Str("server_name", serverName).
 				Msg("Skipping cached key response with a bad self-signature")
 			continue
 		}
-		// Promote into memory so the next request skips the database.
-		c.mem.StoreKeys(&resp)
-		return &resp, nil
+		r := resp
+		best = &r
 	}
-	return nil, nil
+	if best == nil {
+		return nil, nil
+	}
+	// Promote into memory so the next request skips the database.
+	c.mem.StoreKeys(best)
+	return best, nil
 }
 
 func (c *layeredCache) StoreKeys(resp *federation.ServerKeyResponse) {

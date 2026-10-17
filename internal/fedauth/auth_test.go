@@ -2,6 +2,7 @@ package fedauth
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -9,9 +10,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rs/zerolog"
 	"go.mau.fi/util/jsontime"
 	"maunium.net/go/mautrix/federation"
 	"maunium.net/go/mautrix/id"
+
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/store"
 )
 
 func TestVerifyRejectsBadHeaders(t *testing.T) {
@@ -249,5 +253,43 @@ func TestNotaryWalkPassesAnExpiredAnswer(t *testing.T) {
 				t.Errorf("Verify OK = %v, want %v (err: %v; asked %v)", res.OK(), tc.wantOK, res.Err, nt.asked)
 			}
 		})
+	}
+}
+
+type fakeKeyStore struct{ rows []store.ServerKeyJSON }
+
+func (f fakeKeyStore) GetServerKeys(context.Context, string, int64) ([]store.ServerKeyJSON, error) {
+	return f.rows, nil
+}
+
+// Synapse's ts_valid_until_ms is per key ID (an old key's is its expired_ts),
+// so rows come back in an order that says nothing of their responses'
+// validity. The cache must use the response valid now and for longest, not
+// the first row: the first one here holds a response that expired, as
+// spiritcroc.de's and nexy7574.co.uk's did (2026-10-17).
+func TestSynapseCacheJudgesResponsesByTheirOwnValidity(t *testing.T) {
+	_, key := signedRequest(t, "remote.example", "example.com")
+	far := time.Now().Add(365 * 24 * time.Hour).UnixMilli()
+	expired := signedKeyResponse(t, key, "remote.example", time.Now().Add(-time.Hour))
+	soon := signedKeyResponse(t, key, "remote.example", time.Now().Add(time.Hour))
+	later := signedKeyResponse(t, key, "remote.example", time.Now().Add(10*time.Hour))
+	c := newLayeredCache(fakeKeyStore{rows: []store.ServerKeyJSON{
+		{KeyID: "ed25519:old", FromServer: "a", ValidUntilMS: far, JSON: expired},
+		{KeyID: "ed25519:old", FromServer: "b", ValidUntilMS: far, JSON: soon},
+		{KeyID: string(key.ID), FromServer: "c", ValidUntilMS: far - 1, JSON: later},
+	}}, 0, zerolog.Nop())
+	res, err := c.LoadKeys("remote.example")
+	if err != nil || res == nil {
+		t.Fatalf("no response: %v", err)
+	}
+	if got := time.Until(res.ValidUntilTS.Time); got < 9*time.Hour {
+		t.Errorf("picked a response valid for %s more, want the longest-valid (about 10h)", got.Round(time.Minute))
+	}
+
+	only := newLayeredCache(fakeKeyStore{rows: []store.ServerKeyJSON{
+		{KeyID: "ed25519:old", FromServer: "a", ValidUntilMS: far, JSON: expired},
+	}}, 0, zerolog.Nop())
+	if res, _ := only.LoadKeys("remote.example"); res != nil {
+		t.Error("returned a response that has expired")
 	}
 }
