@@ -199,3 +199,55 @@ func TestExpiryCheckIgnoresWhichKeyWasUsed(t *testing.T) {
 		t.Error("an expired key response was accepted")
 	}
 }
+
+// notaryTransport answers key queries per notary host with a response we
+// control; the origin itself (and anything else) 404s, so only a notary can
+// supply the key.
+type notaryTransport struct {
+	byHost map[string][]byte
+	asked  []string
+}
+
+func (n *notaryTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	reply := func(code int, body []byte) (*http.Response, error) {
+		return &http.Response{StatusCode: code, Body: io.NopCloser(bytes.NewReader(body)),
+			Header: http.Header{"Content-Type": []string{"application/json"}}, Request: r}, nil
+	}
+	if strings.Contains(r.URL.Path, "/_matrix/key/v2/query") {
+		host, _, _ := strings.Cut(r.URL.Host, ":")
+		n.asked = append(n.asked, host)
+		if body, ok := n.byHost[host]; ok {
+			return reply(http.StatusOK, []byte(`{"server_keys":[`+string(body)+`]}`))
+		}
+	}
+	return reply(http.StatusNotFound, []byte(`{}`))
+}
+
+// A notary's answer that is no longer valid does not end the walk: the next
+// notary is asked, and its current copy used. Stopping at the first answer
+// holding the key ID served an expired key while every later notary had a
+// current one (nexy7574.co.uk, whose keys last 30 minutes, 2026-10-17).
+func TestNotaryWalkPassesAnExpiredAnswer(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		notaries []string
+		wantOK   bool
+	}{
+		{"expired first, current second", []string{"stale.example", "fresh.example"}, true},
+		{"only an expired one", []string{"stale.example"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			v := New("example.com", Options{Notaries: tc.notaries})
+			req, key := signedRequest(t, "remote.example", "example.com")
+			nt := &notaryTransport{byHost: map[string][]byte{
+				"stale.example": signedKeyResponse(t, key, "remote.example", time.Now().Add(-time.Minute)),
+				"fresh.example": signedKeyResponse(t, key, "remote.example", time.Now().Add(30*time.Minute)),
+			}}
+			v.auth.Client.HTTP = &http.Client{Transport: nt}
+			res := v.Verify(req)
+			if res.OK() != tc.wantOK {
+				t.Errorf("Verify OK = %v, want %v (err: %v; asked %v)", res.OK(), tc.wantOK, res.Err, nt.asked)
+			}
+		})
+	}
+}

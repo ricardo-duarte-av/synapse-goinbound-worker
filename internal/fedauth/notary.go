@@ -64,6 +64,15 @@ func (v *Verifier) queryNotaries(ctx context.Context, serverName string, keyID i
 					Msg("Notary returned keys with an invalid self-signature")
 				continue
 			}
+			if !time.Now().Before(keys.ValidUntilTS.Time) {
+				// Not valid for this request, so not what we asked for:
+				// ask the next notary. Stopping here served a key past its
+				// validity while every other notary had a current one
+				// (nexy7574.co.uk, whose keys last 30 minutes, 2026-10-17).
+				zerolog.Ctx(ctx).Debug().Str("notary", notary).Str("server_name", serverName).
+					Msg("Notary returned keys no longer valid; asking the next one")
+				continue
+			}
 			v.auth.Keys.StoreKeys(keys)
 			if keys.HasKey(keyID) {
 				return true
