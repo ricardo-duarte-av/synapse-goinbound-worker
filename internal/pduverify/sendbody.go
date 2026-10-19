@@ -213,18 +213,42 @@ func (s *Verifier) compareEntry(ctx context.Context, id string, stored *pdu.Even
 			add("unsigned.age_ts: stored is %dms after ours", dt)
 		}
 	}
-	for _, k := range unionKeys(entry.Event, storedEv) {
-		if !reflect.DeepEqual(entry.Event[k], storedEv[k]) {
-			a, _ := json.Marshal(entry.Event[k])
+	meta, err := s.st.InternalMetadata(ctx, id)
+	if err != nil {
+		return nil, "", err
+	}
+	ours := entry.Event
+	if r, _ := meta["redacted"].(bool); r && entry.InternalMetadata["redacted"] == nil {
+		// The persister applied a redaction that arrived first
+		// (_apply_existing_redaction_txn, Synapse 1.163): it stores the
+		// event pruned, from the full copy we send, as from Synapse's. So
+		// ours is compared pruned, and unsigned (which pruning keeps only
+		// in part) is left out.
+		raw, err := json.Marshal(entry.Event)
+		if err != nil {
+			return nil, "", err
+		}
+		pruned, err := pdu.Redact(raw, stored.Room)
+		if err != nil {
+			return nil, "", err
+		}
+		ours = map[string]any{}
+		d := json.NewDecoder(bytes.NewReader(pruned))
+		d.UseNumber()
+		if err := d.Decode(&ours); err != nil {
+			return nil, "", err
+		}
+		delete(storedEv, "unsigned")
+		meta = withoutKey(meta, "redacted")
+	}
+	for _, k := range unionKeys(ours, storedEv) {
+		if !reflect.DeepEqual(ours[k], storedEv[k]) {
+			a, _ := json.Marshal(ours[k])
 			b, _ := json.Marshal(storedEv[k])
 			add("event.%s: ours %s, stored %s", k, clip(a), clip(b))
 		}
 	}
 
-	meta, err := s.st.InternalMetadata(ctx, id)
-	if err != nil {
-		return nil, "", err
-	}
 	for _, k := range []string{"txn_id", "token_id", "device_id", "proactively_send"} {
 		if _, ok := meta[k]; ok {
 			// Made here: sent by one of our clients (txn_id, token_id,
@@ -254,6 +278,17 @@ func (s *Verifier) compareEntry(ctx context.Context, id string, stored *pdu.Even
 		add("context.state_group: ours %d, stored %d", want, g)
 	}
 	return diffs, "", nil
+}
+
+// withoutKey is m without k, as a copy.
+func withoutKey(m map[string]any, k string) map[string]any {
+	out := make(map[string]any, len(m))
+	for kk, v := range m {
+		if kk != k {
+			out[kk] = v
+		}
+	}
+	return out
 }
 
 // buildSendEntry is the entry for an event the other checks agreed on. why
