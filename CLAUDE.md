@@ -170,6 +170,17 @@ things that are not derivable from the code.
   3.13: slot = id & mask, 9 linear probes, perturb, resize at 3/5 full,
   and `set(set)` copies). The insertion order is a frozenset of event IDs,
   random per process, so only colliding slots are real ties (~0.3%).
+- **The resolution cache is per process, and so are its group IDs.** Two
+  sibling events on the same prevs reuse one group only if one process
+  handles both. Our writer drains any origin's staged events with its own
+  cache, so Python (or we) may store an identical new group where the
+  shadow's cache reused one (2026-10-19, Matrix HQ). Skipped as
+  "resolution not cached by Synapse".
+- **The shadow waits for prevs; Synapse doesn't.** When some prevs reach the
+  timeline only after a PDU, Synapse may have failed to fetch them and
+  dropped it, while our snapshot, taken once they came in by other
+  transactions, decides to persist (2026-10-19, `!ping12…`). Skipped as
+  "prevs arrived after it".
 - **Matrix HQ's missing prevs store full groups**: ~13.6k rows each, 364
   in one day (2026-10-14). Synapse's missing-prevs path passes the
   fetched state as `state_ids_before_event`, which never becomes a delta.

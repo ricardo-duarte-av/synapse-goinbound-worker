@@ -703,7 +703,24 @@ func (s *Verifier) CheckDecision(ctx context.Context, id string, d *Decision, sn
 	}
 	if g := d.Entry.Group(); g != 0 {
 		if before != g {
-			diffs = append(diffs, fmt.Sprintf("group before: ours %d, Synapse %d", g, before))
+			plan := groupPlan{kind: planFull}
+			if p, delta := d.Entry.PrevGroup(); p != 0 {
+				plan = groupPlan{kind: planDelta, prev: p, delta: delta}
+			}
+			why, err := s.storedAs(ctx, before, id, plan)
+			if err != nil {
+				return res.fail(OutcomeError, err.Error())
+			}
+			if why == "" {
+				// Synapse stored, for this event, a new group with the
+				// state ours reuses, built the same way: the process
+				// that handled it had not resolved these groups before.
+				// Our writer drains any origin's staged events with a
+				// cache of its own, and so does each Synapse process.
+				// The mirror of "resolution cached by Synapse".
+				return res.fail(OutcomeSkipped, "resolution not cached by Synapse")
+			}
+			diffs = append(diffs, fmt.Sprintf("group before: ours %d, Synapse %d (%s)", g, before, why))
 		}
 	} else {
 		plan := groupPlan{kind: planFull}

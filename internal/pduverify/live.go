@@ -59,6 +59,9 @@ type job struct {
 	decideErr string
 	staged    []byte
 	redacted  bool // staged pruned: its content hash failed
+	// prevsLate: some prev events reached the timeline only after the PDU
+	// arrived, so the snapshot may hold prevs Synapse failed to fetch.
+	prevsLate bool
 }
 
 // LiveOptions tunes the shadow.
@@ -267,7 +270,7 @@ func (l *Live) prepare(j *job) {
 		j.decideErr = "auth types"
 		return
 	}
-	l.awaitPrevs(ctx, j.eventID, ev.PrevEvents)
+	j.prevsLate = l.awaitPrevs(ctx, j.eventID, ev.PrevEvents)
 	snap, err := l.st.TakeSnapshot(ctx, j.roomID, j.eventID, ev.PrevEvents, types)
 	switch {
 	case err != nil:
@@ -341,28 +344,31 @@ func rescindsInvite(ev *pdu.Event, server string) bool {
 // fetched from the sender first. A snapshot taken on arrival would see the
 // room before them, and find "missing prevs" Synapse never missed. Taken
 // once they are in, it sees the room as Synapse is about to.
-func (l *Live) awaitPrevs(ctx context.Context, eventID string, prevs []string) {
+//
+// It reports whether the prevs became ready only after waiting: then Synapse
+// may have had to fetch some of them, and may have failed to.
+func (l *Live) awaitPrevs(ctx context.Context, eventID string, prevs []string) (late bool) {
 	start := time.Now()
 	outcome := "timeout"
 	defer func() {
 		liveSnapshotWait.WithLabelValues(outcome).Observe(time.Since(start).Seconds())
 	}()
 	delay := 25 * time.Millisecond
-	for {
+	for first := true; ; first = false {
 		ready, present, err := l.st.PrevsReady(ctx, eventID, prevs)
 		switch {
 		case err != nil:
 			outcome = "error"
-			return
+			return false
 		case present:
 			outcome = "event_persisted"
-			return
+			return false
 		case ready:
 			outcome = "prevs_ready"
-			return
+			return !first
 		}
 		if time.Since(start)+delay > l.prevWait {
-			return
+			return false
 		}
 		t := time.NewTimer(delay)
 		select {
@@ -370,7 +376,7 @@ func (l *Live) awaitPrevs(ctx context.Context, eventID string, prevs []string) {
 		case <-ctx.Done():
 			t.Stop()
 			outcome = "cancelled"
-			return
+			return false
 		}
 		if delay < time.Second {
 			delay *= 2
@@ -657,6 +663,7 @@ var reasonLabels = []string{
 	"deferred: state resolution v1", "deferred: auth", "deferred: soft fail", "deferred: push",
 	"deferred: prev event without state group", "deferred: not in room, invite rescission",
 	"deferred: guest access change, local guests", "deferred",
+	"prevs arrived after it", "resolution not cached by Synapse",
 	"no decision", "decide failed", "not persisted", "still queued by Synapse", "auth types", "snapshot failed",
 	"push not configured", "invite", "min depth", "no state before", "pruned", "redacted", "push",
 	"unparseable", "event id", "content hash", "state resolution", "auth",
@@ -715,6 +722,17 @@ func (l *Live) decideNotPersisted(ctx context.Context, j *job, log zerolog.Logge
 	}
 	if staged, err := l.st.Staged(ctx, j.eventID); err == nil && staged {
 		l.record("decide", OutcomeSkipped, "still queued by Synapse")
+		return
+	}
+	if j.prevsLate {
+		// Our snapshot waited for prevs that came in after the PDU.
+		// Synapse handles it as soon as it reaches the PDU, fetching
+		// what is missing, and drops it if a fetch fails; the prevs can
+		// still arrive later, by other transactions. We decided on the
+		// later room, so the two decisions saw different inputs.
+		l.record("decide", OutcomeSkipped, "prevs arrived after it")
+		log.Info().Str("check", "decide").
+			Msg("PDU shadow: Synapse did not persist a PDU whose prevs arrived after it")
 		return
 	}
 	l.record("decide", OutcomeMismatch, "decide")
