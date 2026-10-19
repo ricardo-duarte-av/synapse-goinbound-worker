@@ -20,15 +20,27 @@ func New(serverName, keyLine string, allow func(string) bool, timeout time.Durat
 	if err != nil {
 		return nil, fmt.Errorf("fedclient: signing key: %w", err)
 	}
-	settings := exhttp.SensibleClientSettings
-	settings.GlobalTimeout = timeout
-	c := federation.NewClient(serverName, key, federation.NewInMemoryCache(), settings)
+	c := federation.NewClient(serverName, key, federation.NewInMemoryCache(), clientSettings(timeout))
 	// mautrix sets no Content-Type; Synapse sends application/json, and
 	// some servers refuse a body without it (400, then M_FORBIDDEN).
 	c.HTTP.Transport = &JSONContentType{Next: c.HTTP.Transport}
 	c.AllowServer = allow
 	c.UserAgent = "goinbound-worker"
 	return c, nil
+}
+
+// clientSettings is mautrix's sensible settings bounded by timeout.
+func clientSettings(timeout time.Duration) exhttp.ClientSettings {
+	s := exhttp.SensibleClientSettings
+	s.GlobalTimeout = timeout
+	// SensibleClientSettings waits 10s for response headers, while Synapse
+	// waits the request's whole timeout (30s for a policy server, 60s and
+	// more for state). A policy server answering in 10-30s signed for
+	// Synapse and timed out here, and as Synapse fails closed, that
+	// soft-failed what Synapse accepted (2026-10-17: beta2.matrix.org,
+	// asgard.chat). The headers get the request's timeout.
+	s.ResponseHeaderTimeout = timeout
+	return s
 }
 
 // JSONContentType adds Content-Type: application/json to requests with a body.
