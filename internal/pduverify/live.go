@@ -715,6 +715,12 @@ func (l *Live) decideNotPersisted(ctx context.Context, j *job, log zerolog.Logge
 		return
 	case d.Defer != "":
 		l.record("decide", OutcomeSkipped, "deferred: "+d.Defer)
+		if d.Defer != "missing prevs" {
+			// What native mode would still leave to Synapse, as for a
+			// persisted PDU.
+			log.Info().Str("check", "decide").Str("reason", "deferred: "+d.Defer).
+				Msg("PDU shadow: write mode would defer a PDU Synapse did not persist")
+		}
 		return
 	case d.Ignore != "" || d.Drop != "":
 		l.record("decide", OutcomeMatch, "not persisted")
