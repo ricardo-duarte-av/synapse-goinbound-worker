@@ -551,8 +551,8 @@ func openWriteDatabase(ctx context.Context, cfg *config.Config, hs *synapsecfg.C
 // pduSink adapts the PDU shadow to txn.PDUSink.
 type pduSink struct{ l *pduverify.Live }
 
-func (p pduSink) Prepare(origin string, body []byte) txn.PDUPending {
-	return p.l.Prepare(origin, body)
+func (p pduSink) Prepare(origin string, body []byte, received time.Time) txn.PDUPending {
+	return p.l.Prepare(origin, body, received)
 }
 
 // roleTables is every table the read-only role is granted: those the EDU path

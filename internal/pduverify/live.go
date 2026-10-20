@@ -136,19 +136,19 @@ type Pending struct {
 // room, before the transaction is handed to Synapse: the soft-fail check needs
 // the room as Synapse found it, and Synapse starts processing as soon as it
 // has the transaction. Commit once Synapse has accepted it, or Discard.
-func (l *Live) Prepare(origin string, txnBody []byte) *Pending {
+// received is the request time the PDUs' age_ts is taken against.
+func (l *Live) Prepare(origin string, txnBody []byte, received time.Time) *Pending {
 	p := &Pending{l: l}
 	pdus := gjson.GetBytes(txnBody, "pdus")
 	if !pdus.IsArray() {
 		return p
 	}
-	now := time.Now()
 	pdus.ForEach(func(_, raw gjson.Result) bool {
 		if len(l.queue)+len(p.jobs) >= cap(l.queue) {
 			liveDropped.Inc()
 			return true
 		}
-		j := &job{raw: []byte(raw.Raw), origin: origin, received: now, snapDone: make(chan struct{})}
+		j := &job{raw: []byte(raw.Raw), origin: origin, received: received, snapDone: make(chan struct{})}
 		p.jobs = append(p.jobs, j)
 		go l.prepare(j)
 		return true

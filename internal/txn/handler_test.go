@@ -520,6 +520,7 @@ type pduSink struct {
 	mu       sync.Mutex
 	bodies   []string
 	prepared int
+	at       []time.Time
 }
 
 type pduPending struct {
@@ -527,10 +528,11 @@ type pduPending struct {
 	body string
 }
 
-func (p *pduSink) Prepare(_ string, b []byte) PDUPending {
+func (p *pduSink) Prepare(_ string, b []byte, at time.Time) PDUPending {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.prepared++
+	p.at = append(p.at, at)
 	return &pduPending{s: p, body: string(b)}
 }
 
@@ -574,6 +576,9 @@ type fakePDUServer struct {
 	results map[string]json.RawMessage
 	planned atomic.Int32
 	ran     atomic.Int32
+	// slow is how long planning takes; at is the request time it got.
+	slow time.Duration
+	at   time.Time
 }
 
 type fakeRun struct{ f *fakePDUServer }
@@ -583,8 +588,10 @@ func (r fakeRun) Run(context.Context) map[string]json.RawMessage {
 	return r.f.results
 }
 
-func (f *fakePDUServer) PlanPDUs(_ context.Context, _ string, pdus []json.RawMessage, _ time.Time) (PDURun, string) {
+func (f *fakePDUServer) PlanPDUs(_ context.Context, _ string, pdus []json.RawMessage, at time.Time) (PDURun, string) {
 	f.planned.Add(1)
+	f.at = at
+	time.Sleep(f.slow)
 	if f.reason != "" {
 		return nil, f.reason
 	}
@@ -639,6 +646,20 @@ func TestWriteModeServesPDUTransactions(t *testing.T) {
 	send(t, r.h, "remote.example", "t2", eduOnly)
 	if got := resp.saved["remote.example/t2"]; got != `200 {"pdus":{}}` {
 		t.Errorf("EDU-only stored %q", got)
+	}
+}
+
+// The shadow derives age_ts from the same request time write mode persisted
+// with, however long planning took (2026-10-20: 10s fetching keys made the
+// shadow's age_ts 10s later than the stored one).
+func TestShadowGetsWriteModesRequestTime(t *testing.T) {
+	ps := &fakePDUServer{results: map[string]json.RawMessage{}, slow: 20 * time.Millisecond}
+	r, _ := pduRig(t, config.Mode{Kind: config.ModeNative}, config.Mode{Kind: config.ModeNative}, ps)
+	sink := &pduSink{}
+	r.h.pdus = sink
+	send(t, r.h, "remote.example", "t1", pduTxn)
+	if len(sink.at) != 1 || ps.at.IsZero() || !sink.at[0].Equal(ps.at) {
+		t.Errorf("shadow got %v, write mode planned with %v", sink.at, ps.at)
 	}
 }
 

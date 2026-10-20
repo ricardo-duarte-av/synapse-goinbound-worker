@@ -53,7 +53,8 @@ type TxnStore interface {
 // PDUSink is the PDU shadow. Prepare is called before the transaction is
 // proxied and must not block; the result is committed if Synapse answers 200.
 type PDUSink interface {
-	Prepare(origin string, txnBody []byte) PDUPending
+	// received is the request time the PDUs' age_ts is taken against.
+	Prepare(origin string, txnBody []byte, received time.Time) PDUPending
 }
 
 // PDUPending is a transaction's PDUs, prepared.
@@ -330,8 +331,10 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, body []byte, txn
 	var pduResults map[string]json.RawMessage
 	var pending PDUPending
 	if d.pdus != nil && h.pdus != nil {
-		// The shadow checks what we persist, as it checks Synapse.
-		pending = h.pdus.Prepare(origin, body)
+		// The shadow checks what we persist, as it checks Synapse, against
+		// the request time we persist with: planning may take a while
+		// (signing keys), and age_ts must not move with it.
+		pending = h.pdus.Prepare(origin, body, d.at)
 	}
 	pduDone := make(chan struct{})
 	go func() {
@@ -423,6 +426,9 @@ type decision struct {
 	// originDown is set when the origin is in backoff, so serving the
 	// transaction means marking it as up.
 	originDown bool
+	// at is the request time write mode planned the PDUs with, Synapse's
+	// request_time (federation_server.py:320).
+	at time.Time
 }
 
 // stateFunc reads a transaction's state; see TxnStore.
@@ -471,7 +477,8 @@ func (h *Handler) decide(ctx context.Context, origin, txnID string, body []byte,
 	}
 	d := decision{steps: steps, originDown: down}
 	if len(pdus) > 0 {
-		run, why := h.pduServer.PlanPDUs(ctx, origin, pdus, time.Now())
+		d.at = time.Now()
+		run, why := h.pduServer.PlanPDUs(ctx, origin, pdus, d.at)
 		if why != "" {
 			return decision{proxyReason: why}
 		}
@@ -522,7 +529,7 @@ func (h *Handler) proxyBody(w http.ResponseWriter, r *http.Request, body []byte,
 		// The claimed origin: the shadow only checks transactions Synapse
 		// accepted, so authenticated ones.
 		origin := federation.ParseXMatrixAuth(r.Header.Get("Authorization")).Origin
-		pending = h.pdus.Prepare(origin, body)
+		pending = h.pdus.Prepare(origin, body, time.Now())
 	}
 	res := h.upstream.Forward(w, withBody(r, body), 0)
 	h.recordProxy(res, reason, rec)
