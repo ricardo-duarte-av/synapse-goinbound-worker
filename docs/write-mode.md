@@ -103,11 +103,22 @@ event must end up persisted exactly once, with nothing left staged.
   `goinbound_pdu_plan_shadow_total{reason}` (`ok`: it would have served it).
   That is the list of what still needs Python under `native`.
 
-- Partial state rooms are deferred. There are none now: the only one, a v1 room
+- Partial state rooms are deferred. The only long-lived one, a v1 room
   that could not be joined (`!cURbafjkfsMDVwdRDQ:matrix.org`), was deleted by the
   operator on 2026-10-16.
 - Guest-access changes that would make local guests leave are deferred
   (none are in any room).
+- Partial state rooms do occur: a room is partial while someone joins it.
+  One event was deferred at 09:45 on 2026-10-20, and the sweep nudge got
+  Python to persist it 1.5s later.
+- Remote fetches retry as Synapse's federation client does: `/state_ids`,
+  `/state` and `/event` for missing state, which Synapse requests without a
+  timeout, get 60s an attempt and up to 3 retries on no response, a 5xx or a
+  429 (`fedfetch.retrying`). `/get_missing_events` (60s) and the fetch from
+  the sender (10s) are tried once. Not ported: `get_pdu`'s per-process
+  cooldown, which skips a destination it asked for the same event less than a
+  minute before (`PDU_RETRY_TIME_MS`), and the destination backoff
+  (`NotRetryingDestination`).
 - Origins in backoff: served with `write.mark_origins_up` (the reset, its
   `caches` stream row and RDATA, then `REMOTE_SERVER_UP`). Only `/send`
   reaches this worker (`not_send` is 0); other federation endpoints go to
