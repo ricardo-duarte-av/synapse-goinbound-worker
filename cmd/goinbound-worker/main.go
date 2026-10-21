@@ -315,7 +315,9 @@ func buildHandler(ctx context.Context, cfg *config.Config, up *proxy.Proxy, log 
 			if hs.DomainWhitelist != nil {
 				allow = func(s string) bool { return hs.DomainWhitelist[s] }
 			}
-			fc, err := fedclient.New(hs.ServerName, line, allow, 2*time.Minute)
+			// An outer bound only: fedfetch times each attempt as Synapse
+			// does, up to 60s for the response and 60s more for its body.
+			fc, err := fedclient.New(hs.ServerName, line, allow, 3*time.Minute)
 			if err != nil {
 				db.Close()
 				return nil, noop, err

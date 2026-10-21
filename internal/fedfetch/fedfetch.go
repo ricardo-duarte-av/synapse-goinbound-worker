@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"strings"
 	"time"
@@ -70,8 +71,17 @@ func New(fed *federation.Client, st *pdustore.Store, v *pduverify.Verifier, poli
 	return &Client{fed: fed, st: st, v: v, policy: policy, server: server, keys: keys}
 }
 
-func (c *Client) do(ctx context.Context, server, method string, path []any, query url.Values, body, out any) error {
-	_, err := c.send(ctx, server, method, path, query, body, out)
+// do is MatrixFederationHttpClient's request with Synapse's timeout:
+// timeout for one attempt, or, when Synapse's caller gives none (zero), the
+// default with its retries.
+func (c *Client) do(ctx context.Context, timeout time.Duration, server, method string, path []any, query url.Values, body, out any) error {
+	send := func(ctx context.Context) (*http.Response, error) {
+		return c.send(ctx, server, method, path, query, body, out)
+	}
+	if timeout == 0 {
+		return retrying(ctx, send)
+	}
+	_, err := attempt(ctx, timeout, send)
 	return err
 }
 
@@ -101,19 +111,10 @@ var (
 	maxShortDelay  = 2 * time.Second
 )
 
-// doRetrying is do for a request Synapse makes without a timeout.
-func (c *Client) doRetrying(ctx context.Context, server, method string, path []any, query url.Values, body, out any) error {
-	return retrying(ctx, func(actx context.Context) (*http.Response, error) {
-		return c.send(actx, server, method, path, query, body, out)
-	})
-}
-
 // retrying runs send as _send_request's retry loop does.
 func retrying(ctx context.Context, send func(context.Context) (*http.Response, error)) error {
 	for left := shortRetries; ; left-- {
-		actx, cancel := context.WithTimeout(ctx, attemptTimeout)
-		resp, err := send(actx)
-		cancel()
+		resp, err := attempt(ctx, attemptTimeout, send)
 		if err == nil || left == 0 || ctx.Err() != nil || !retryable(resp) {
 			return err
 		}
@@ -129,6 +130,22 @@ func retrying(ctx context.Context, send func(context.Context) (*http.Response, e
 	}
 }
 
+// attempt is one try with Synapse's two timeouts: timeout until the response
+// arrives (_send_request's timeout_deferred), then timeout again to read its
+// body (_handle_response). One deadline over both cut off big bodies:
+// Matrix HQ's /state_ids from matrix.org takes over a minute to arrive
+// (2026-10-21).
+func attempt(ctx context.Context, timeout time.Duration, send func(context.Context) (*http.Response, error)) (*http.Response, error) {
+	actx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	t := time.AfterFunc(timeout, func() { cancel(errTimedOut) })
+	defer t.Stop()
+	trace := &httptrace.ClientTrace{GotFirstResponseByte: func() { t.Reset(timeout) }}
+	return send(httptrace.WithClientTrace(actx, trace))
+}
+
+var errTimedOut = errors.New("fedfetch: timed out")
+
 // retryable is RequestSendFailed(can_retry=True): no response at all (a
 // connection error, a DNS failure, the attempt timing out), or a 5xx or 429.
 // Other statuses, and a body that fails to read after the headers, are not.
@@ -139,13 +156,11 @@ func retryable(resp *http.Response) bool {
 // MissingEvents is get_missing_events: up to limit events between earliest
 // and latest, from origin, checked. Synapse asks with a 60s timeout.
 func (c *Client) MissingEvents(ctx context.Context, origin, roomID string, rv *pdu.RoomVersion, earliest, latest []string, limit, minDepth int) ([]*Pulled, error) {
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
 	var resp struct {
 		Events []json.RawMessage `json:"events"`
 	}
 	body := map[string]any{"limit": limit, "min_depth": minDepth, "earliest_events": earliest, "latest_events": latest}
-	if err := c.do(ctx, origin, http.MethodPost, []any{"v1", "get_missing_events", roomID}, nil, body, &resp); err != nil {
+	if err := c.do(ctx, 60*time.Second, origin, http.MethodPost, []any{"v1", "get_missing_events", roomID}, nil, body, &resp); err != nil {
 		return nil, err
 	}
 	out := make([]*Pulled, 0, len(resp.Events))
@@ -169,7 +184,7 @@ func (c *Client) StateIDs(ctx context.Context, dest, roomID, eventID string) (st
 	}
 	q := url.Values{"event_id": {eventID}}
 	// get_room_state_ids: no timeout.
-	if err := c.doRetrying(ctx, dest, http.MethodGet, []any{"v1", "state_ids", roomID}, q, nil, &resp); err != nil {
+	if err := c.do(ctx, 0, dest, http.MethodGet, []any{"v1", "state_ids", roomID}, q, nil, &resp); err != nil {
 		return nil, nil, err
 	}
 	// "invalid response from /state_ids" unless both are lists; a list
@@ -189,19 +204,15 @@ func (c *Client) StateIDs(ctx context.Context, dest, roomID, eventID string) (st
 // _get_events_and_persist asks: the event, checked, or nil when the server
 // does not have it.
 func (c *Client) Event(ctx context.Context, dest, eventID, roomID string, rv *pdu.RoomVersion) (*Pulled, error) {
-	return c.event(ctx, dest, eventID, roomID, rv, true)
+	return c.event(ctx, 0, dest, eventID, roomID, rv)
 }
 
-// event is get_pdu; retry is whether Synapse's caller gave no timeout.
-func (c *Client) event(ctx context.Context, dest, eventID, roomID string, rv *pdu.RoomVersion, retry bool) (*Pulled, error) {
+// event is get_pdu with its caller's timeout (zero: none).
+func (c *Client) event(ctx context.Context, timeout time.Duration, dest, eventID, roomID string, rv *pdu.RoomVersion) (*Pulled, error) {
 	var resp struct {
 		PDUs []json.RawMessage `json:"pdus"`
 	}
-	do := c.do
-	if retry {
-		do = c.doRetrying
-	}
-	if err := do(ctx, dest, http.MethodGet, []any{"v1", "event", eventID}, nil, nil, &resp); err != nil {
+	if err := c.do(ctx, timeout, dest, http.MethodGet, []any{"v1", "event", eventID}, nil, nil, &resp); err != nil {
 		return nil, err
 	}
 	if len(resp.PDUs) == 0 {
@@ -226,7 +237,7 @@ func (c *Client) State(ctx context.Context, dest, roomID, eventID string, rv *pd
 	}
 	q := url.Values{"event_id": {eventID}}
 	// get_room_state: no timeout.
-	if err := c.doRetrying(ctx, dest, http.MethodGet, []any{"v1", "state", roomID}, q, nil, &resp); err != nil {
+	if err := c.do(ctx, 0, dest, http.MethodGet, []any{"v1", "state", roomID}, q, nil, &resp); err != nil {
 		return nil, nil, err
 	}
 	for _, list := range []struct {
@@ -371,10 +382,9 @@ func (c *Client) badSignature(ctx context.Context, err error, ev *pdu.Event, id 
 		// "Failed to find copy of ... with valid signature": dropped.
 		return nil, nil
 	}
-	// get_pdu(timeout=10000): one attempt.
-	fctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	p, err := c.event(fctx, sender, id, roomID, rv, false)
+	// get_pdu(timeout=10000): one attempt. The timeout is the request's;
+	// checking what comes back is not bounded by it.
+	p, err := c.event(ctx, 10*time.Second, sender, id, roomID, rv)
 	if errors.Is(err, ErrUncertain) {
 		return nil, err
 	}
