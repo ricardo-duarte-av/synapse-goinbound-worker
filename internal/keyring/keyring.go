@@ -15,6 +15,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -47,8 +48,14 @@ type Keyring struct {
 
 // failedRefetch is how long a server whose keys could not be found is left
 // alone. Synapse has no such delay; it only spares us repeating a fetch that
-// just failed, and a key not found makes the transaction Synapse's anyway.
+// just failed. A lookup it cuts short says ErrNotLooked, so that no key
+// found then is never taken for Synapse's "Failed to find any key".
 const failedRefetch = 10 * time.Minute
+
+// ErrNotLooked is keys still missing that were not looked for again: a
+// lookup for the server found nothing less than failedRefetch ago. It is
+// ErrKeyUnknown, but not a pdu.SignatureError.
+var ErrNotLooked = fmt.Errorf("%w: not looked for again yet", pdu.ErrKeyUnknown)
 
 // New builds a keyring for serverName, asking notaries (trusted_key_servers,
 // in order) before the servers themselves.
@@ -99,8 +106,11 @@ func (k *Keyring) fetch(ctx context.Context, server string, keyIDs []string, min
 	merge(k.mem[server])
 	recent := k.now().Sub(k.tried[server]) < failedRefetch
 	k.mu.Unlock()
-	if len(missing) == 0 || recent || server == k.server {
+	if len(missing) == 0 || server == k.server {
 		return found, nil
+	}
+	if recent {
+		return found, ErrNotLooked
 	}
 
 	merge(k.fromNotaries(ctx, server, setKeys(missing), minValid))

@@ -171,17 +171,20 @@ func (f *FrontDoor) checkSigs(ctx context.Context, pp *plannedPDU) string {
 		lookup = f.d.Keys.Fetch(ctx)
 	}
 	if err := pdu.CheckSignaturesWith(ev, pp.raw, lookup); err != nil {
-		if errors.Is(err, pdu.ErrKeyUnknown) {
-			// Not found where Synapse would look.
-			return "pdu_key_unknown"
-		}
+		// No key valid at the time is "Failed to find any key" in
+		// Synapse too, once its Keyring has looked: as final as a bad
+		// signature when ours looked as far.
 		var se *pdu.SignatureError
-		if errors.As(err, &se) {
+		if errors.As(err, &se) && (se.Kind != pdu.SigNoKey || f.d.Keys != nil) {
 			if entry, ok := signatureErrorEntry(se); ok {
 				// Not staged; the answer says why, in Synapse's words.
 				pp.failed = entry
 				return ""
 			}
+		}
+		if errors.Is(err, pdu.ErrKeyUnknown) {
+			// Not found where Synapse would look.
+			return "pdu_key_unknown"
 		}
 		return "pdu_bad_signature"
 	}

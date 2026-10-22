@@ -349,8 +349,9 @@ func (c *Client) failed(ctx context.Context, roomID, eventID, cause string) {
 // batch a look for a good copy, ours or the sender's server's.
 func (c *Client) badSignature(ctx context.Context, err error, ev *pdu.Event, id string, rv *pdu.RoomVersion, roomID, origin string, mode checkMode) (*Pulled, error) {
 	var se *pdu.SignatureError
-	if !errors.As(err, &se) {
-		// A key Synapse would fetch and we could not find.
+	if !errors.As(err, &se) || se.Kind == pdu.SigNoKey && c.keys == nil {
+		// A lookup that failed, or one that did not look as far as
+		// Synapse's Keyring: a key it might yet find.
 		return nil, fmt.Errorf("%w: pulled event %s: %v", ErrUncertain, id, err)
 	}
 	text, ok := se.SynapseText()

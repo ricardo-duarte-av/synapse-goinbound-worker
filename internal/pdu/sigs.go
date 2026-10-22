@@ -355,8 +355,10 @@ type KeyLookup func(server string, keyIDs []string) (map[string]VerifyKey, error
 // it can look further (Synapse's Keyring) when what it holds expires sooner.
 type KeyFetch func(server string, keyIDs []string, minValidMS int64) (map[string]VerifyKey, error)
 
-// ErrKeyUnknown means none of a server's signing keys could be found. Synapse
-// would fetch them; not having them is not proof the signature is bad.
+// ErrKeyUnknown means no key of the server's valid at the time required was
+// found. Synapse would fetch them; not having them is not proof the signature
+// is bad, unless the lookup looked as far as Synapse's Keyring does. The
+// failure is a *SignatureError of Kind SigNoKey, which matches it.
 var ErrKeyUnknown = errors.New("pdu: no known key for the signing server")
 
 // SignatureError is a failed signature check: InvalidEventSignatureError in
@@ -369,6 +371,10 @@ type SignatureError struct {
 	// (SigSender, SigEventDomain, SigAuthorising), KeyID the key, and Kind
 	// how it failed (SigNotSigned, SigForged, SigBadLength, SigMalformed).
 	Server, Role, KeyID, Kind string
+	// KeyIDs and MinValidMS are, for SigNoKey, the keys looked for and the
+	// time they had to be valid at: Synapse's _FetchKeyRequest.
+	KeyIDs     []string
+	MinValidMS int64
 }
 
 // Why a server must sign, as _check_sigs_on_pdu words it.
@@ -384,9 +390,19 @@ const (
 	SigForged    = "forged"     // BadSignatureError
 	SigBadLength = "bad length" // nacl ValueError: not 64 bytes
 	SigMalformed = "malformed"  // not a string, or base64 we decode differently
+	SigNoKey     = "no key"     // no key valid at the time required was found
 )
 
 func (e *SignatureError) Error() string { return "signature: " + e.Msg }
+
+// Unwrap makes SigNoKey match ErrKeyUnknown: a caller whose lookup did not
+// look as far as Synapse's Keyring treats it as unknown, not as a failure.
+func (e *SignatureError) Unwrap() error {
+	if e.Kind == SigNoKey {
+		return ErrKeyUnknown
+	}
+	return nil
+}
 
 // CheckSignatures is _check_sigs_on_pdu (federation_base.py:207): the event
 // must be signed by the sender's server (unless it is an invite from a third
@@ -482,7 +498,7 @@ func verifyForServer(server string, signed []byte, validity int64, lookup KeyFet
 		return err
 	}
 	if len(found) == 0 {
-		return fmt.Errorf("%w: %s", ErrKeyUnknown, server)
+		return noKey(server, keyIDs, validity, "")
 	}
 
 	message, err := without(signed, "signatures", "unsigned")
@@ -520,11 +536,20 @@ func verifyForServer(server string, signed []byte, validity int64, lookup KeyFet
 		verified = true
 	}
 	if !verified {
-		// We hold keys, but none valid at the time required. Synapse
-		// would go and fetch fresher ones, so this proves nothing.
-		return fmt.Errorf("%w: %s (only keys expired before %d)", ErrKeyUnknown, server, validity)
+		// We hold keys, but none valid at the time required: the same
+		// "Failed to find any key" in Synapse, once it has looked for
+		// fresher ones.
+		return noKey(server, keyIDs, validity, fmt.Sprintf(" (only keys expired before %d)", validity))
 	}
 	return nil
+}
+
+// noKey is process_request finding no key to verify with.
+func noKey(server string, keyIDs []string, validity int64, detail string) error {
+	return &SignatureError{
+		Msg:    fmt.Sprintf("%v: %s%s", ErrKeyUnknown, server, detail),
+		Server: server, Kind: SigNoKey, KeyIDs: keyIDs, MinValidMS: validity,
+	}
 }
 
 // VerifyWithKey is signedjson's verify_signed_json over the event's redacted
@@ -580,6 +605,16 @@ func (e *SignatureError) SynapseText() (string, bool) {
 	case SigBadLength:
 		inner = fmt.Sprintf("401: Invalid signature for server %s with key %s: Unable to verify signature for %s: "+
 			"<class 'nacl.exceptions.ValueError'> The signature must be exactly 64 bytes long", e.Server, e.KeyID, e.Server)
+	case SigNoKey:
+		// keyring.py process_request: f"Failed to find any key to satisfy:
+		// {key_request}", the attrs repr of _FetchKeyRequest. Its key_ids
+		// is list(set(...)), in an order random per process, so only one
+		// key ID is reproducible; reprs are plain only for plain names.
+		if len(e.KeyIDs) != 1 || !plainRepr(e.Server) || !plainRepr(e.KeyIDs[0]) {
+			return "", false
+		}
+		inner = fmt.Sprintf("401: Failed to find any key to satisfy: _FetchKeyRequest(server_name='%s', "+
+			"minimum_valid_until_ts=%d, key_ids=['%s'])", e.Server, e.MinValidMS, e.KeyIDs[0])
 	default:
 		return "", false
 	}
@@ -587,4 +622,16 @@ func (e *SignatureError) SynapseText() (string, bool) {
 		return "", false
 	}
 	return fmt.Sprintf("unable to verify signature for %s %s: %s", e.Role, e.Server, inner), true
+}
+
+// plainRepr says Python's repr of s is s in single quotes: printable ASCII
+// with no quote or backslash.
+func plainRepr(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < 0x20 || c > 0x7e || c == '\'' || c == '"' || c == '\\' {
+			return false
+		}
+	}
+	return true
 }
