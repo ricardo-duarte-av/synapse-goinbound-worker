@@ -16,13 +16,13 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"net/http"
-	"net/http/httptrace"
 	"net/url"
 	"strings"
 	"time"
 
 	"maunium.net/go/mautrix/federation"
 
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/fedclient"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/keyring"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pdu"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pdustore"
@@ -130,21 +130,10 @@ func retrying(ctx context.Context, send func(context.Context) (*http.Response, e
 	}
 }
 
-// attempt is one try with Synapse's two timeouts: timeout until the response
-// arrives (_send_request's timeout_deferred), then timeout again to read its
-// body (_handle_response). One deadline over both cut off big bodies:
-// Matrix HQ's /state_ids from matrix.org takes over a minute to arrive
-// (2026-10-21).
+// attempt is fedclient.Attempt.
 func attempt(ctx context.Context, timeout time.Duration, send func(context.Context) (*http.Response, error)) (*http.Response, error) {
-	actx, cancel := context.WithCancelCause(ctx)
-	defer cancel(nil)
-	t := time.AfterFunc(timeout, func() { cancel(errTimedOut) })
-	defer t.Stop()
-	trace := &httptrace.ClientTrace{GotFirstResponseByte: func() { t.Reset(timeout) }}
-	return send(httptrace.WithClientTrace(actx, trace))
+	return fedclient.Attempt(ctx, timeout, send)
 }
-
-var errTimedOut = errors.New("fedfetch: timed out")
 
 // retryable is RequestSendFailed(can_retry=True): no response at all (a
 // connection error, a DNS failure, the attempt timing out), or a 5xx or 429.

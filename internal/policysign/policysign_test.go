@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"testing"
+	"time"
 
 	"maunium.net/go/mautrix/crypto/canonicaljson"
 	"maunium.net/go/mautrix/federation"
@@ -120,5 +121,33 @@ func TestUnknownEndpoint(t *testing.T) {
 		if got := unknownEndpoint(c.status, []byte(c.body)); got != c.want {
 			t.Errorf("%d %s: %v", c.status, c.body, got)
 		}
+	}
+}
+
+// A policy server whose answer starts within the timeout and ends after it
+// still signs, as for Synapse, which times the body on its own
+// (room_policy.py timeout=30000, _send_request then _handle_response).
+func TestSignTimesTheBodyOnItsOwn(t *testing.T) {
+	_, priv, _ := ed25519.GenerateKey(nil)
+	keyLine := "ed25519 a_test " + base64.RawStdEncoding.EncodeToString(priv.Seed())
+	const timeout = 300 * time.Millisecond
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(timeout * 2 / 3)
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		time.Sleep(timeout * 2 / 3)
+		w.Write([]byte(`{"policy.example":{"ed25519:policy_server":"sig"}}`))
+	}))
+	defer srv.Close()
+	to, _ := url.Parse(srv.URL)
+	c, err := New("us.example", keyLine, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.timeout = timeout
+	c.fed.HTTP.Transport.(*fedclient.JSONContentType).Next = rewrite{to}
+	sigs, err := c.Sign(context.Background(), "policy.example", json.RawMessage(`{}`))
+	if err != nil || sigs["ed25519:policy_server"] != "sig" {
+		t.Errorf("slow body: %v, %v", sigs, err)
 	}
 }

@@ -4,8 +4,11 @@
 package fedclient
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptrace"
 	"time"
 
 	"go.mau.fi/util/exhttp"
@@ -29,10 +32,12 @@ func New(serverName, keyLine string, allow func(string) bool, timeout time.Durat
 	return c, nil
 }
 
-// clientSettings is mautrix's sensible settings bounded by timeout.
+// clientSettings is mautrix's sensible settings for Synapse's request
+// timeout: the response gets timeout, and the request as a whole twice that,
+// the response's and then the body's (Attempt times each as Synapse does).
 func clientSettings(timeout time.Duration) exhttp.ClientSettings {
 	s := exhttp.SensibleClientSettings
-	s.GlobalTimeout = timeout
+	s.GlobalTimeout = 2 * timeout
 	// SensibleClientSettings waits 10s for response headers, while Synapse
 	// waits the request's whole timeout (30s for a policy server, 60s and
 	// more for state). A policy server answering in 10-30s signed for
@@ -42,6 +47,24 @@ func clientSettings(timeout time.Duration) exhttp.ClientSettings {
 	s.ResponseHeaderTimeout = timeout
 	return s
 }
+
+// Attempt is one request with Synapse's two timeouts: timeout until the
+// response arrives (matrixfederationclient.py _send_request's
+// timeout_deferred), then timeout again to read its body
+// (_handle_response). One deadline over both cut off big bodies: Matrix
+// HQ's /state_ids from matrix.org takes over a minute to arrive
+// (2026-10-21).
+func Attempt[T any](ctx context.Context, timeout time.Duration, send func(context.Context) (T, error)) (T, error) {
+	actx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	t := time.AfterFunc(timeout, func() { cancel(ErrTimedOut) })
+	defer t.Stop()
+	trace := &httptrace.ClientTrace{GotFirstResponseByte: func() { t.Reset(timeout) }}
+	return send(httptrace.WithClientTrace(actx, trace))
+}
+
+// ErrTimedOut is the cause of an Attempt's context ending on its timeout.
+var ErrTimedOut = errors.New("fedclient: timed out")
 
 // JSONContentType adds Content-Type: application/json to requests with a body.
 type JSONContentType struct{ Next http.RoundTripper }

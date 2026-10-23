@@ -22,14 +22,18 @@ import (
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/fedclient"
 )
 
-// Timeout is Synapse's: one attempt, no retries (a request with a timeout is
-// never retried, matrixfederationclient.py:850).
+// Timeout is Synapse's (room_policy.py: timeout=30000): one attempt, no
+// retries (a request with a timeout is never retried,
+// matrixfederationclient.py:850), with timeout until the response arrives
+// and the same again for its body. The unstable endpoint, asked after the
+// stable one is unknown, is a request of its own with the same timeout.
 const Timeout = 30 * time.Second
 
 // Client asks policy servers, signing each request as our server, with the
 // X-Matrix header Synapse's federation client sends.
 type Client struct {
-	fed *federation.Client
+	fed     *federation.Client
+	timeout time.Duration // Timeout; shorter in tests
 }
 
 // New builds a client signing as serverName with a Synapse-format key line
@@ -40,7 +44,7 @@ func New(serverName, keyLine string, allow func(string) bool) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("policysign: %w", err)
 	}
-	return &Client{fed: c}, nil
+	return &Client{fed: c, timeout: Timeout}, nil
 }
 
 // Refused is an answer that Synapse takes as the policy server refusing the
@@ -63,8 +67,6 @@ func (e *Refused) Error() string {
 // ID. Synapse adds every one of them to the event. Any error is, for
 // Synapse, a refusal.
 func (c *Client) Sign(ctx context.Context, server string, event json.RawMessage) (map[string]string, error) {
-	ctx, cancel := context.WithTimeout(ctx, Timeout)
-	defer cancel()
 	body, err := c.post(ctx, server, mautrix.BaseURLPath{"_matrix", "policy", "v1", "sign"}, event)
 	var ref *Refused
 	if errors.As(err, &ref) && unknownEndpoint(ref.Status, []byte(ref.Body)) {
@@ -92,13 +94,21 @@ func (c *Client) Sign(ctx context.Context, server string, event json.RawMessage)
 }
 
 func (c *Client) post(ctx context.Context, server string, path mautrix.BaseURLPath, event json.RawMessage) ([]byte, error) {
-	body, resp, err := c.fed.MakeFullRequest(ctx, federation.RequestParams{
-		ServerName:   server,
-		Method:       http.MethodPost,
-		Path:         path,
-		Authenticate: true,
-		RequestJSON:  event,
+	type answer struct {
+		body []byte
+		resp *http.Response
+	}
+	a, err := fedclient.Attempt(ctx, c.timeout, func(ctx context.Context) (answer, error) {
+		body, resp, err := c.fed.MakeFullRequest(ctx, federation.RequestParams{
+			ServerName:   server,
+			Method:       http.MethodPost,
+			Path:         path,
+			Authenticate: true,
+			RequestJSON:  event,
+		})
+		return answer{body, resp}, err
 	})
+	body, resp := a.body, a.resp
 	if resp != nil && resp.StatusCode >= 300 {
 		return nil, &Refused{Status: resp.StatusCode, Body: clip(body)}
 	}
