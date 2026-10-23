@@ -114,10 +114,10 @@ event must end up persisted exactly once, with nothing left staged.
 - A signing key nobody holds valid at the event's time (a dead server's,
   expired) is decided as Synapse decides it, on `/send` and for pulled
   events alike: "Failed to find any key to satisfy: _FetchKeyRequest(...)",
-  the PDU dropped and, when pulled, the failure recorded. Only after our
-  keyring has looked as far as Synapse's (held keys, notaries, the server);
-  within `failedRefetch` of a failed lookup, or with more than one key ID
-  (Synapse lists them in set order), it is still left to Synapse.
+  the PDU dropped and, when pulled, the failure recorded. Our keyring looks
+  as far as Synapse's every time (held keys, notaries, the server), as
+  Synapse does, with no delay after a failed lookup. With more than one key
+  ID (Synapse lists them in set order), it is still left to Synapse.
 - Remote fetches retry as Synapse's federation client does: `/state_ids`,
   `/state` and `/event` for missing state, which Synapse requests without a
   timeout, get 60s an attempt and up to 3 retries on no response, a 5xx or a

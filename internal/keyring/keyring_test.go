@@ -5,7 +5,6 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -89,19 +88,17 @@ func TestKeyring(t *testing.T) {
 	if got["ed25519:a"].ValidUntilMS != now.UnixMilli()+7200_000 || directHits.Load() != 1 {
 		t.Fatalf("direct: %v, hits %d", got, directHits.Load())
 	}
-	// A key nobody has is not asked for again at once, and the lookup that
-	// did not ask says so: its "not found" is not Synapse's.
-	d := directHits.Load()
-	if _, err := fetch("origin.example", []string{"ed25519:nope"}, 0); err != nil {
-		t.Errorf("looked and found nothing: %v", err)
+	// A key nobody has is looked for every time, as Synapse looks: its "not
+	// found" is then always Synapse's "Failed to find any key".
+	d, n := directHits.Load(), notaryHits.Load()
+	for range 2 {
+		if got, err := fetch("origin.example", []string{"ed25519:nope"}, 0); err != nil || len(got) != 0 {
+			t.Errorf("looked and found nothing: %v, %v", got, err)
+		}
 	}
-	_, err := fetch("origin.example", []string{"ed25519:nope"}, 0)
-	if directHits.Load() != d+1 {
-		t.Errorf("asked %d times for a missing key", directHits.Load()-d)
-	}
-	var se *pdu.SignatureError
-	if !errors.Is(err, ErrNotLooked) || !errors.Is(err, pdu.ErrKeyUnknown) || errors.As(err, &se) {
-		t.Errorf("not looked again: %v", err)
+	if directHits.Load() != d+2 || notaryHits.Load() != n+2 {
+		t.Errorf("asked the server %d and the notary %d times for a missing key, want 2 each",
+			directHits.Load()-d, notaryHits.Load()-n)
 	}
 }
 

@@ -15,7 +15,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -41,21 +40,14 @@ type Keyring struct {
 	server   string
 	now      func() time.Time
 
-	mu    sync.Mutex
-	mem   map[string]map[string]pdu.VerifyKey
-	tried map[string]time.Time // last fetch that found nothing, per server
+	mu  sync.Mutex
+	mem map[string]map[string]pdu.VerifyKey
 }
 
-// failedRefetch is how long a server whose keys could not be found is left
-// alone. Synapse has no such delay; it only spares us repeating a fetch that
-// just failed. A lookup it cuts short says ErrNotLooked, so that no key
-// found then is never taken for Synapse's "Failed to find any key".
-const failedRefetch = 10 * time.Minute
-
-// ErrNotLooked is keys still missing that were not looked for again: a
-// lookup for the server found nothing less than failedRefetch ago. It is
-// ErrKeyUnknown, but not a pdu.SignatureError.
-var ErrNotLooked = fmt.Errorf("%w: not looked for again yet", pdu.ErrKeyUnknown)
+// Keys not found are looked for again every time, as Synapse's Keyring does:
+// it asks the notaries and the server on each request, the server even with
+// ignore_backoff=True (keyring.py:981-993). So a key not found is always a
+// full lookup, and is what Synapse's "Failed to find any key" would be.
 
 // New builds a keyring for serverName, asking notaries (trusted_key_servers,
 // in order) before the servers themselves.
@@ -64,7 +56,7 @@ func New(serverName string, db DBKeys, notaries []string) *Keyring {
 	settings.GlobalTimeout = 30 * time.Second
 	fed := federation.NewClient(serverName, nil, federation.NewInMemoryCache(), settings)
 	return &Keyring{db: db, fed: fed, notaries: notaries, server: serverName, now: time.Now,
-		mem: map[string]map[string]pdu.VerifyKey{}, tried: map[string]time.Time{}}
+		mem: map[string]map[string]pdu.VerifyKey{}}
 }
 
 // Fetch is pdu.KeyFetch: the keys found for server among keyIDs, each the
@@ -104,23 +96,14 @@ func (k *Keyring) fetch(ctx context.Context, server string, keyIDs []string, min
 	merge(held)
 	k.mu.Lock()
 	merge(k.mem[server])
-	recent := k.now().Sub(k.tried[server]) < failedRefetch
 	k.mu.Unlock()
 	if len(missing) == 0 || server == k.server {
 		return found, nil
-	}
-	if recent {
-		return found, ErrNotLooked
 	}
 
 	merge(k.fromNotaries(ctx, server, setKeys(missing), minValid))
 	if len(missing) > 0 {
 		merge(k.direct(ctx, server))
-	}
-	if len(missing) > 0 {
-		k.mu.Lock()
-		k.tried[server] = k.now()
-		k.mu.Unlock()
 	}
 	return found, nil
 }
