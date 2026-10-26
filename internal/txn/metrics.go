@@ -2,6 +2,7 @@ package txn
 
 import (
 	"encoding/json"
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pdu"
 	"strconv"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -19,11 +20,16 @@ const (
 	routeAbandoned = "abandoned"
 )
 
+// marshalError is Synapse's error body, cs_error as canonical JSON.
 func marshalError(errcode, msg string) ([]byte, error) {
-	return json.Marshal(struct {
+	b, err := json.Marshal(struct {
 		ErrCode string `json:"errcode"`
 		Error   string `json:"error"`
 	}{errcode, msg})
+	if err != nil {
+		return nil, err
+	}
+	return pdu.Canonical(b)
 }
 
 var (

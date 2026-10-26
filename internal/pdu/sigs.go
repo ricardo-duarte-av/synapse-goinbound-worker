@@ -217,13 +217,36 @@ func without(raw []byte, drop ...string) ([]byte, error) {
 	return out.bytes(), nil
 }
 
-// Canonical is the canonical JSON of raw.
+// Canonical is the canonical JSON of raw, as Python's canonicaljson writes
+// it: a control character's \u escape in lowercase hex (\u001b, where
+// mautrix writes \u001B).
 func Canonical(raw []byte) ([]byte, error) {
 	out, err := canonicaljson.CanonicalJSON(raw)
 	if err != nil {
 		return nil, fmt.Errorf("%w: canonical JSON: %v", ErrMalformed, err)
 	}
+	lowerEscapes(out)
 	return out, nil
+}
+
+// lowerEscapes lowercases the hex digits of every \u escape in canonical
+// JSON, in place, leaving an escaped backslash and what follows it alone.
+func lowerEscapes(b []byte) {
+	for i := 0; i < len(b); i++ {
+		if b[i] != '\\' || i+1 >= len(b) {
+			continue
+		}
+		if b[i+1] == 'u' && i+5 < len(b) {
+			for j := i + 2; j < i+6; j++ {
+				if b[j] >= 'A' && b[j] <= 'F' {
+					b[j] += 'a' - 'A'
+				}
+			}
+			i += 5
+			continue
+		}
+		i++ // \\, \", \n and the like
+	}
 }
 
 // ReferenceHash is compute_event_reference_hash: sha256 of the canonical

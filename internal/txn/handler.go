@@ -31,6 +31,7 @@ import (
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/config"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/edu"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/fedauth"
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pdu"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/proxy"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/store"
 )
@@ -366,6 +367,10 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, body []byte, txn
 	ans := answer{status: http.StatusOK, body: []byte(`{"pdus":{}}`)}
 	if len(pduResults) > 0 {
 		b, err := canonicaljson.Marshal(map[string]any{"pdus": pduResults})
+		if err == nil {
+			// Python's escapes: lowercase hex.
+			b, err = pdu.Canonical(b)
+		}
 		if err != nil {
 			h.log.Error().Err(err).Msg("Could not encode a transaction answer")
 		} else {
