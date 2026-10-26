@@ -77,8 +77,16 @@ things that are not derivable from the code.
   `received_transactions`.
 - **EDUs of one type are forwarded in order.** Different types go in
   parallel. This is slightly stricter than Synapse, on purpose.
-- **Auth failures are proxied, never answered.** Python gives the
-  authoritative 401, or verifies something we couldn't.
+- **Auth failures are answered only in Synapse's words** (operator,
+  2026-10-26; they were all proxied before). `internal/synapseauth` ports
+  `authenticate_request` onto write mode's keyring: the body parsed first,
+  the headers, the destination, the whitelist, then
+  `verify_json_for_server`. A request our fast verifier refuses is answered
+  only when the port refuses it too, with an error whose text we
+  reproduce; when the port accepts it, or the words depend on what we do
+  not reproduce (a body Python canonicalizes differently, an unusual
+  repr), it is proxied. Checked against the 1.163 image's own
+  `_parse_auth_header` and signedjson.
 - **Modes are per payload, and both are required** (`modes.edu`,
   `modes.pdu`). The operator asked for explicit over implicit: nothing is
   proxied "because that is the default". `modes.pdu` accepts only `proxy`

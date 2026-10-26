@@ -34,6 +34,7 @@ import (
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pdu"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/proxy"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/store"
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/synapseauth"
 )
 
 // Verifier authenticates an X-Matrix request.
@@ -122,6 +123,10 @@ type Options struct {
 	// OriginUp, when set, marks an origin in backoff as up, so its
 	// transactions are served here. Nil proxies them.
 	OriginUp OriginUp
+	// SynapseAuth, when set, judges a request as Synapse's
+	// authenticate_request would, so that its refusals are answered here
+	// in Synapse's words; without it they are proxied.
+	SynapseAuth *synapseauth.Authenticator
 	// DomainWhitelist is federation_domain_whitelist; nil means none.
 	DomainWhitelist map[string]bool
 	MaxBody         int64
@@ -148,6 +153,7 @@ type Handler struct {
 	writeOrigins   map[string]bool
 	responses      TxnResponses
 	originUp       OriginUp
+	sauth          *synapseauth.Authenticator
 	log            zerolog.Logger
 	// planSem bounds the plan shadow (planDry).
 	planSem chan struct{}
@@ -177,6 +183,7 @@ func NewHandler(o Options) *Handler {
 		writeOrigins:   setOf(o.WriteOrigins),
 		responses:      o.Responses,
 		originUp:       o.OriginUp,
+		sauth:          o.SynapseAuth,
 		log:            o.Log,
 		planSem:        make(chan struct{}, planShadowConcurrency),
 	}
@@ -259,7 +266,30 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // serve handles a buffered v1 /send in canary or native mode.
 func (h *Handler) serve(w http.ResponseWriter, r *http.Request, body []byte, txnID string, rec *txnRec) {
+	// Synapse parses the body and the headers before any key is looked
+	// at: what it refuses there, it refuses whatever our verifier says.
+	var sreq synapseauth.Request
+	var pre *synapseauth.Prechecked
+	if h.sauth != nil {
+		sreq = synapseauth.FromHTTP(r, body)
+		var res synapseauth.Result
+		if pre, res = h.sauth.Precheck(sreq); res.Answer != nil {
+			h.answerAuth(w, r, res, rec)
+			return
+		}
+	}
 	vr := h.verifier.Verify(withBody(r, body))
+	if !vr.OK() && pre != nil {
+		// Judged as Synapse would, with its keyring; answered here when
+		// Synapse refuses it too and we have its words.
+		if res := h.sauth.Verify(r.Context(), sreq, pre, rec.start.UnixMilli()); res.Answer != nil {
+			h.answerAuth(w, r, res, rec)
+			return
+		} else if res.Origin != "" {
+			h.log.Info().Str("origin", res.Origin).Str("ours", vr.Err.Err).
+				Msg("Authentication failed here, but Synapse's rules accept it; proxied")
+		}
+	}
 	if !vr.OK() {
 		// Synapse gives the authoritative 401, or accepts a request we could
 		// not verify -- a key server we cannot reach, say. Either way it is
@@ -570,6 +600,16 @@ func (h *Handler) write(w http.ResponseWriter, ans answer, route, outcome string
 	rec.route, rec.reason, rec.status = route, outcome, ans.status
 	requests.WithLabelValues(route, outcome).Inc()
 	duration.WithLabelValues(route).Observe(time.Since(rec.start).Seconds())
+}
+
+// answerAuth answers a request Synapse's authentication refuses, as it
+// answers it: the SynapseError as canonical JSON.
+func (h *Handler) answerAuth(w http.ResponseWriter, r *http.Request, res synapseauth.Result, rec *txnRec) {
+	a := res.Answer
+	claimed := federation.ParseXMatrixAuth(r.Header.Get("Authorization"))
+	h.log.Info().Str("origin", claimed.Origin).Str("key_id", string(claimed.KeyID)).Int("status", a.Status).
+		Str("error", a.Error).Msg("Authentication failed, answered as Synapse")
+	h.write(w, jsonError(a.Status, a.Errcode, a.Error), routeNative, reasonAuth, rec)
 }
 
 // clientIP is the address a request came from, as Synapse takes it behind a

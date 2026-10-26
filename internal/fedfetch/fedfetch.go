@@ -382,8 +382,8 @@ func (c *Client) check(ctx context.Context, raw []byte, rv *pdu.RoomVersion, roo
 	if err != nil {
 		return nil, err
 	}
-	if v.Skip != "" {
-		return nil, fmt.Errorf("%w: policy: %s", ErrUncertain, v.Skip)
+	if v.Skip != "" || v.Raise != "" {
+		return nil, fmt.Errorf("%w: policy: %s%s", ErrUncertain, v.Skip, v.Raise)
 	}
 	var sigs map[string]string
 	if v.Verdict == pduverify.PolicyAsk {

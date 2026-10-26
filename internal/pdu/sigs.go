@@ -508,11 +508,31 @@ func CheckSignaturesWith(ev *Event, raw []byte, lookup KeyFetch) error {
 // verifyForServer is Keyring.process_request for one server: every key we
 // hold that is valid at validity must verify, and there must be one.
 func verifyForServer(server string, signed []byte, validity int64, lookup KeyFetch) error {
+	return verifyKeyIDs(server, signed, validity, lookup, false)
+}
+
+// VerifyJSONForServer is Keyring.verify_json_for_server: process_request
+// over VerifyJSONRequest.from_json_object, whose key IDs are signedjson's
+// signature_ids (ed25519 ones only, unlike an event's).
+func VerifyJSONForServer(server string, signed []byte, validity int64, lookup KeyFetch) error {
+	return verifyKeyIDs(server, signed, validity, lookup, true)
+}
+
+func verifyKeyIDs(server string, signed []byte, validity int64, lookup KeyFetch, ed25519Only bool) error {
 	sigs, ok := field(get(gjson.ParseBytes(signed), "signatures"), server)
 	if !ok || !sigs.IsObject() {
 		return &SignatureError{Msg: "not signed by " + server, Server: server, Kind: SigNotSigned}
 	}
 	keyIDs := keys(sigs)
+	if ed25519Only {
+		kept := keyIDs[:0]
+		for _, kid := range keyIDs {
+			if alg, _, _ := strings.Cut(kid, ":"); alg == "ed25519" {
+				kept = append(kept, kid)
+			}
+		}
+		keyIDs = kept
+	}
 	if len(keyIDs) == 0 {
 		return &SignatureError{Msg: "not signed by " + server, Server: server, Kind: SigNotSigned}
 	}
@@ -629,15 +649,11 @@ func (e *SignatureError) SynapseText() (string, bool) {
 		inner = fmt.Sprintf("401: Invalid signature for server %s with key %s: Unable to verify signature for %s: "+
 			"<class 'nacl.exceptions.ValueError'> The signature must be exactly 64 bytes long", e.Server, e.KeyID, e.Server)
 	case SigNoKey:
-		// keyring.py process_request: f"Failed to find any key to satisfy:
-		// {key_request}", the attrs repr of _FetchKeyRequest. Its key_ids
-		// is list(set(...)), in an order random per process, so only one
-		// key ID is reproducible; reprs are plain only for plain names.
-		if len(e.KeyIDs) != 1 || !plainRepr(e.Server) || !plainRepr(e.KeyIDs[0]) {
+		text, ok := e.fetchKeyText()
+		if !ok {
 			return "", false
 		}
-		inner = fmt.Sprintf("401: Failed to find any key to satisfy: _FetchKeyRequest(server_name='%s', "+
-			"minimum_valid_until_ts=%d, key_ids=['%s'])", e.Server, e.MinValidMS, e.KeyIDs[0])
+		inner = "401: " + text
 	default:
 		return "", false
 	}
@@ -647,12 +663,154 @@ func (e *SignatureError) SynapseText() (string, bool) {
 	return fmt.Sprintf("unable to verify signature for %s %s: %s", e.Role, e.Server, inner), true
 }
 
+// RequestText is the SynapseError a request's verification raises, its
+// msg as authenticate_request lets it out: process_request's words, without
+// _check_sigs_on_pdu's wrapping. ok is false where we do not reproduce them.
+func (e *SignatureError) RequestText() (string, bool) {
+	switch e.Kind {
+	case SigNotSigned:
+		return "Not signed by " + e.Server, true
+	case SigForged:
+		return fmt.Sprintf("Invalid signature for server %s with key %s: Unable to verify signature for %s: "+
+			"<class 'nacl.exceptions.BadSignatureError'> Signature was forged or corrupt", e.Server, e.KeyID, e.Server), true
+	case SigBadLength:
+		return fmt.Sprintf("Invalid signature for server %s with key %s: Unable to verify signature for %s: "+
+			"<class 'nacl.exceptions.ValueError'> The signature must be exactly 64 bytes long", e.Server, e.KeyID, e.Server), true
+	case SigNoKey:
+		return e.fetchKeyText()
+	}
+	return "", false
+}
+
+// fetchKeyText is keyring.py process_request's f"Failed to find any key to
+// satisfy: {key_request}", the attrs repr of _FetchKeyRequest. Its key_ids
+// is list(set(...)): with several, their order follows str hashes, which
+// are random per Python process, so Synapse writes them in any order, and
+// ours (the signatures') is one it could write. Reprs are plain only for
+// plain names.
+func (e *SignatureError) fetchKeyText() (string, bool) {
+	if len(e.KeyIDs) == 0 || !plainRepr(e.Server) {
+		return "", false
+	}
+	ids := make([]string, len(e.KeyIDs))
+	for i, k := range e.KeyIDs {
+		if !plainRepr(k) {
+			return "", false
+		}
+		ids[i] = "'" + k + "'"
+	}
+	return fmt.Sprintf("Failed to find any key to satisfy: _FetchKeyRequest(server_name='%s', "+
+		"minimum_valid_until_ts=%d, key_ids=[%s])", e.Server, e.MinValidMS, strings.Join(ids, ", ")), true
+}
+
 // plainRepr says Python's repr of s is s in single quotes: printable ASCII
 // with no quote or backslash.
 func plainRepr(s string) bool {
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		if c < 0x20 || c > 0x7e || c == '\'' || c == '"' || c == '\\' {
+			return false
+		}
+	}
+	return true
+}
+
+// ContentHashRaise is str() of the SynapseError check_event_content_hash
+// raises for raw, whose CheckContentHash failed: "400: Malformed 'hashes':
+// <class 'list'>", "400: Algorithm sha256 not in hashes ['md5']", "400:
+// Invalid base64: 5". ok is false where it might not raise, or where we do
+// not reproduce its words.
+func ContentHashRaise(raw []byte) (text string, ok bool) {
+	hashes, present := field(gjson.ParseBytes(raw), "hashes")
+	if !present || !hashes.IsObject() {
+		t, ok := pyTypeName(hashes, present)
+		if !ok {
+			return "", false
+		}
+		return "400: Malformed 'hashes': <class '" + t + "'>", true
+	}
+	want, present := field(hashes, "sha256")
+	if !present {
+		names := keys(hashes)
+		reprs := make([]string, len(names))
+		for i, n := range names {
+			if !plainRepr(n) {
+				return "", false
+			}
+			reprs[i] = "'" + n + "'"
+		}
+		return "400: Algorithm sha256 not in hashes [" + strings.Join(reprs, ", ") + "]", true
+	}
+	var shown string
+	switch want.Type {
+	case gjson.String:
+		for i := 0; i < len(want.Str); i++ {
+			if want.Str[i] > 0x7e {
+				// .encode("ascii") raises: worded, but only plain text
+				// is printed as we print it.
+				return "", false
+			}
+		}
+		if _, err := decodeUnpaddedBase64(want.Str); err == nil {
+			return "", false // it decodes: no raise
+		}
+		// b64decode without validate drops what is not in the alphabet,
+		// so it may decode what we refuse.
+		return "", false
+	case gjson.Null:
+		shown = "None"
+	case gjson.True:
+		shown = "True"
+	case gjson.False:
+		shown = "False"
+	case gjson.Number:
+		if !pyIntLiteral(want.Raw) {
+			return "", false
+		}
+		shown = strings.TrimPrefix(want.Raw, "+")
+		if shown == "-0" {
+			shown = "0"
+		}
+	default:
+		return "", false
+	}
+	return "400: Invalid base64: " + shown, true
+}
+
+// pyTypeName is type(v).__name__ for a JSON value as json.loads gives it;
+// absent is None.
+func pyTypeName(v gjson.Result, present bool) (string, bool) {
+	if !present {
+		return "NoneType", true
+	}
+	switch v.Type {
+	case gjson.Null:
+		return "NoneType", true
+	case gjson.String:
+		return "str", true
+	case gjson.True, gjson.False:
+		return "bool", true
+	case gjson.Number:
+		if pyIntLiteral(v.Raw) {
+			return "int", true
+		}
+		return "float", true
+	}
+	if v.IsArray() {
+		return "list", true
+	}
+	return "", false
+}
+
+func pyIntLiteral(raw string) bool {
+	if raw == "" {
+		return false
+	}
+	for i, c := range raw {
+		if c == '-' && i == 0 {
+			continue
+		}
+		if c < '0' || c > '9' {
 			return false
 		}
 	}

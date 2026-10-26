@@ -95,6 +95,16 @@ event must end up persisted exactly once, with nothing left staged.
 
 ## Known gaps
 
+- Requests Synapse refuses are answered here, in its words
+  (`internal/synapseauth`): a body that is not a JSON object, missing or
+  malformed X-Matrix headers, a wrong destination, the whitelist, and the
+  keyring's "Failed to find any key" and "Invalid signature". A PDU whose
+  `hashes` is malformed gets check_event_content_hash's raise as its entry,
+  and one whose room's policy server host is_host_joined refuses gets
+  "Invalid host name"; neither is staged. A redacted policy event is read
+  pruned, as Synapse loads it. With several key IDs, "Failed to find any
+  key" lists them in the signatures' order: Synapse's is random per
+  process.
 - Transactions write mode leaves to Synapse on purpose: `PlanPDUs` returns a
   `pdu_*` reason when a PDU's outcome is not certain to match Synapse's
   (unknown keys, bad signatures, content hash, policy, ACL). For PDU

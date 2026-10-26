@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/tidwall/sjson"
 
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pdu"
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pdustore"
 )
 
 // policyKeyID is POLICY_SERVER_KEY_ID (handlers/room_policy.py:35).
@@ -44,6 +46,37 @@ type PolicyVerdict struct {
 	key    string
 	// Skip is a reason the verdict is not Synapse's for certain.
 	Skip string
+	// Raise is str() of what Synapse raises looking the policy server up:
+	// is_host_joined's "Invalid host name". The PDU then fails.
+	Raise string
+}
+
+// raiseInvalidHost is is_host_joined's Exception("Invalid host name").
+const raiseInvalidHost = "raise: Invalid host name"
+
+// loadedContent is the policy event's content as get_current_state_event
+// returns it: pruned when Synapse would load it redacted.
+func (s *Verifier) loadedContent(ctx context.Context, roomID string, ev *pdustore.CurrentEvent) (gjson.Result, error) {
+	if !ev.Redacted {
+		return gjson.GetBytes(ev.JSON, "content"), nil
+	}
+	red, err := s.st.RedactedOnLoad(ctx, []string{ev.EventID})
+	if err != nil || !red[ev.EventID] {
+		return gjson.GetBytes(ev.JSON, "content"), err
+	}
+	rvID, err := s.st.RoomVersion(ctx, roomID)
+	if err != nil {
+		return gjson.Result{}, err
+	}
+	rv, ok := pdu.LookupRoomVersion(rvID)
+	if !ok {
+		return gjson.Result{}, fmt.Errorf("pduverify: room version %s", rvID)
+	}
+	pruned, err := pdu.Redact(ev.JSON, rv)
+	if err != nil {
+		return gjson.Result{}, err
+	}
+	return gjson.GetBytes(pruned, "content"), nil
 }
 
 // policyServer is _get_policy_server: the room's policy server and its
@@ -61,16 +94,14 @@ func (s *Verifier) policyServer(ctx context.Context, roomID, ourName string) (na
 		if err != nil || ev == nil {
 			return "", "", "", err
 		}
-		if ev.Redacted {
-			return "", "", "policy event redacted", nil
+		if content, err = s.loadedContent(ctx, roomID, ev); err != nil {
+			return "", "", "", err
 		}
-		content = gjson.GetBytes(ev.JSON, "content")
 		keyV = pdu.Get(content, "public_key")
 	} else {
-		if ev.Redacted {
-			return "", "", "policy event redacted", nil
+		if content, err = s.loadedContent(ctx, roomID, ev); err != nil {
+			return "", "", "", err
 		}
-		content = gjson.GetBytes(ev.JSON, "content")
 		if pks := pdu.Get(content, "public_keys"); pks.IsObject() {
 			keyV = pdu.Get(pks, "ed25519")
 		}
@@ -88,7 +119,7 @@ func (s *Verifier) policyServer(ctx context.Context, roomID, ourName string) (na
 		return "", "", "", err
 	case !ok:
 		// is_host_joined raises.
-		return "", "", "policy server host not looked up", nil
+		return "", "", raiseInvalidHost, nil
 	case !joined:
 		return "", "", "", nil
 	}
@@ -107,6 +138,9 @@ func (s *Verifier) Policy(ctx context.Context, raw []byte, ev *pdu.Event, ourNam
 		return PolicyVerdict{Skip: "redacted on receipt"}, nil
 	}
 	name, key, skip, err := s.policyServer(ctx, ev.RoomID, ourName)
+	if skip == raiseInvalidHost {
+		return PolicyVerdict{Raise: "Invalid host name"}, nil
+	}
 	if err != nil || skip != "" {
 		return PolicyVerdict{Skip: skip}, err
 	}
@@ -131,6 +165,9 @@ func (s *Verifier) CheckPolicy(ctx context.Context, id string, raw []byte, v Pol
 	res := &Result{EventID: id}
 	if v.Skip != "" {
 		return res.fail(OutcomeSkipped, v.Skip)
+	}
+	if v.Raise != "" {
+		return res.fail(OutcomeSkipped, "policy lookup raises")
 	}
 	got, _, err := s.st.GetStoredEvents(ctx, []string{id})
 	if err != nil {

@@ -159,10 +159,7 @@ func (f *FrontDoor) PlanPDUs(ctx context.Context, origin string, pdus []json.Raw
 // checkSigs is _check_sigs_and_hash, for the outcomes we reproduce: valid,
 // and either no policy server or a decided one.
 func (f *FrontDoor) checkSigs(ctx context.Context, pp *plannedPDU) string {
-	ok, err := pdu.CheckContentHash(pp.raw)
-	if err != nil {
-		return "pdu_content_hash"
-	}
+	ok, hashErr := pdu.CheckContentHash(pp.raw)
 	ev := pp.ev
 	lookup := func(server string, keyIDs []string, _ int64) (map[string]pdu.VerifyKey, error) {
 		return f.d.Store.VerifyKeys(ctx, server, keyIDs)
@@ -188,6 +185,20 @@ func (f *FrontDoor) checkSigs(ctx context.Context, pp *plannedPDU) string {
 		}
 		return "pdu_bad_signature"
 	}
+	if hashErr != nil {
+		// check_event_content_hash raises, after the signatures pass: not a
+		// FederationError, so "Failed to handle PDU", the entry str(e).
+		text, worded := pdu.ContentHashRaise(pp.raw)
+		if !worded {
+			return "pdu_content_hash"
+		}
+		b, _ := json.Marshal(map[string]string{"error": text})
+		var err error
+		if pp.failed, err = pdu.Canonical(b); err != nil {
+			return "pdu_content_hash"
+		}
+		return ""
+	}
 	if !ok {
 		// "Event content has been tampered, redacting": the pruned copy
 		// is staged, and no policy server is asked.
@@ -197,6 +208,12 @@ func (f *FrontDoor) checkSigs(ctx context.Context, pp *plannedPDU) string {
 	v, err := f.d.Verifier.Policy(ctx, pp.raw, ev, f.d.Server)
 	if err != nil {
 		return "pdu_db_error"
+	}
+	if v.Raise != "" {
+		// is_event_allowed raises: "Failed to handle PDU", not staged.
+		b, _ := json.Marshal(map[string]string{"error": v.Raise})
+		pp.failed = b
+		return ""
 	}
 	if v.Skip != "" {
 		return "pdu_policy_uncertain"

@@ -61,7 +61,9 @@ func TestSignatureErrorEntry(t *testing.T) {
 			t.Errorf("%s: ok=%v\ngot  %s\nwant %s", name, ok, got, wantNoKey)
 		}
 	}
-	// Two key IDs: key_ids is list(set(...)), in no order we can know.
+	// Two key IDs: key_ids is list(set(...)), whose order follows str
+	// hashes, random per Python process: Synapse writes either order, and
+	// we write the signatures'.
 	two := []byte(`{"type":"m.room.message","room_id":"!r:x","sender":"@a:remote.example","content":{},"depth":3,"origin_server_ts":1,` +
 		`"prev_events":[],"auth_events":[],"hashes":{"sha256":"x"},"signatures":{"remote.example":{"ed25519:k":"AA","ed25519:j":"AA"}}}`)
 	ev2, _ := pdu.ParseEvent(two, "$e", rv, false)
@@ -69,7 +71,8 @@ func TestSignatureErrorEntry(t *testing.T) {
 	if err := pdu.CheckSignaturesWith(ev2, two, none); !errors.As(err, &se) || se.Kind != pdu.SigNoKey {
 		t.Fatalf("two keys: %v", err)
 	}
-	if _, ok := signatureErrorEntry(se); ok {
-		t.Error("two key IDs: claimed Synapse's words")
+	wantTwo := `{"error":"ERROR 403: unable to verify signature for sender domain remote.example: 401: Failed to find any key to satisfy: _FetchKeyRequest(server_name='remote.example', minimum_valid_until_ts=1, key_ids=['ed25519:k', 'ed25519:j'])"}`
+	if got, ok := signatureErrorEntry(se); !ok || string(got) != wantTwo {
+		t.Errorf("two key IDs: ok=%v\ngot  %s\nwant %s", ok, got, wantTwo)
 	}
 }

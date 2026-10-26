@@ -42,6 +42,7 @@ import (
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/replication"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/stateres"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/store"
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/synapseauth"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/synapsecfg"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/txn"
 )
@@ -312,6 +313,9 @@ func buildHandler(ctx context.Context, cfg *config.Config, up *proxy.Proxy, log 
 		// Keys Synapse does not hold yet, found as its Keyring would.
 		keys := keyring.New(hs.ServerName, pst.VerifyKeys, notaries)
 		keys.Backoff = limiter
+		// Requests our verifier refuses are judged as Synapse would, with
+		// this keyring, and its refusals answered here.
+		opts.SynapseAuth = synapseauth.New(hs.ServerName, hs.DomainWhitelist, keys.Fetch)
 		// Write mode's own policy client: the shadow's asks change no
 		// timings.
 		writeAsker := asker

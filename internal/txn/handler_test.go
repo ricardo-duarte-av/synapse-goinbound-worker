@@ -21,8 +21,10 @@ import (
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/config"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/edu"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/fedauth"
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pdu"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/proxy"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/store"
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/synapseauth"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/synapsecfg"
 )
 
@@ -788,5 +790,29 @@ func TestSameJSON(t *testing.T) {
 	}
 	if sameJSON([]byte(`{"pdus":{}}`), []byte(`{"pdus":{"$a":{}}}`)) {
 		t.Error("different answers compared equal")
+	}
+}
+
+// With Synapse's authentication, what it refuses is answered here, in its
+// words, and never reaches the upstream; what its rules accept, though our
+// verifier refused it, still goes to Synapse.
+func TestAuthRefusalsAnsweredAsSynapse(t *testing.T) {
+	r := newRig(t, config.Mode{Kind: config.ModeNative})
+	r.h.sauth = synapseauth.New("local.test", nil, func(context.Context) pdu.KeyFetch {
+		return func(string, []string, int64) (map[string]pdu.VerifyKey, error) {
+			return map[string]pdu.VerifyKey{}, nil
+		}
+	})
+	rec := send(t, r.h, "forged.example", "t1", eduOnly)
+	want := `{"errcode":"M_UNAUTHORIZED","error":"Failed to find any key to satisfy: _FetchKeyRequest(server_name='forged.example', minimum_valid_until_ts=`
+	if rec.Code != 401 || !strings.HasPrefix(rec.Body.String(), want) || !strings.HasSuffix(rec.Body.String(), `, key_ids=['ed25519:a'])"}`) {
+		t.Errorf("no key: %d %s", rec.Code, rec.Body)
+	}
+	rec = send(t, r.h, "remote.example", "t2", `{"pdus":`)
+	if rec.Code != 400 || rec.Body.String() != `{"errcode":"M_NOT_JSON","error":"Content not JSON."}` {
+		t.Errorf("not JSON: %d %s", rec.Code, rec.Body)
+	}
+	if r.up.count() != 0 {
+		t.Errorf("%d requests reached Synapse", r.up.count())
 	}
 }

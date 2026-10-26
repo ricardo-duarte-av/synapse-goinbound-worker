@@ -665,7 +665,7 @@ var reasonLabels = []string{
 	"state_groups did not match", "soft_fail did not match", "no hashes", "redacted on receipt",
 	"event_from_pdu_json", "policy server soft-failed it", "send body", "local event",
 	"no policy server", "policy event", "signed", "asked, signed", "asked, refused", "Synapse asks",
-	"policy event redacted", "policy server host not looked up", "policy lookup", "policy did not match", "policy answer", "policy",
+	"policy event redacted", "policy server host not looked up", "policy lookup raises", "policy lookup", "policy did not match", "policy answer", "policy",
 	"Synapse did not ask", "both refused", "same signature", "shutting down",
 	"decide", "deferred: missing prevs", "deferred: partial state room", "deferred: push for an invite",
 	"deferred: state resolution v1", "deferred: state resolution not ported", "deferred: missing auth events",
