@@ -122,6 +122,11 @@ func (f *fakePersister) SendEvents(ctx context.Context, room string, entries []j
 			if _, err := f.c.Exec(ctx, `INSERT INTO event_forward_extremities (event_id, room_id) VALUES ($1, $2)`, id, room); err != nil {
 				return err
 			}
+			if gjson.GetBytes(e, "context.partial_state").Bool() {
+				if _, err := f.c.Exec(ctx, `INSERT INTO partial_state_events (room_id, event_id) VALUES ($1, $2)`, room, id); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	return nil
@@ -181,6 +186,14 @@ func TestWriteModeFetchesMissingPrevs(t *testing.T) {
 		defer func() { authGap = "" }()
 		runMissingPrevs(t, true, false)
 	})
+	// The room is still being joined (partial state), and M1 has partial
+	// state: M2 and M3 are decided, not left to Synapse, with partial_state
+	// in their context, as the persister records it.
+	t.Run("partial state room", func(t *testing.T) {
+		partialRoom = true
+		defer func() { partialRoom = false }()
+		runMissingPrevs(t, true, false)
+	})
 	// Through the front door, beside a PDU with a forged signature.
 	t.Run("front door", func(t *testing.T) {
 		frontDoor = true
@@ -190,6 +203,9 @@ func TestWriteModeFetchesMissingPrevs(t *testing.T) {
 }
 
 var frontDoor bool
+
+// partialRoom makes the room one with partial state, M1 included.
+var partialRoom bool
 
 // authGap gives Carol, whose join we do not hold, a PDU: the one received
 // ("served": the origin has /event_auth, "unserved": it does not) or the
@@ -301,6 +317,10 @@ func runMissingPrevs(t *testing.T, originHasIt, gap bool) {
 	}
 	must(`INSERT INTO event_forward_extremities (event_id, room_id) VALUES ($1, $2)`, m1ID, room)
 	must(`INSERT INTO room_depth (room_id, min_depth) VALUES ($1, 1)`, room)
+	if partialRoom {
+		must(`INSERT INTO partial_state_rooms (room_id) VALUES ($1)`, room)
+		must(`INSERT INTO partial_state_events (room_id, event_id) VALUES ($1, $2)`, room, m1ID)
+	}
 	must(`INSERT INTO local_current_membership (room_id, user_id, event_id, membership) VALUES ($1, $2, $3, 'join')`, room, alice, aJoinID)
 	must(`INSERT INTO server_signature_keys (server_name, key_id, from_server, ts_added_ms, verify_key, ts_valid_until_ms)
 		VALUES ('remote.test', 'ed25519:r', 'remote.test', 1, $1, 9000000000000)`, []byte(rpriv.Public().(ed25519.PublicKey)))
@@ -548,6 +568,9 @@ func runMissingPrevs(t *testing.T, originHasIt, gap bool) {
 		return
 	}
 	for i, e := range per.sent {
+		if got := gjson.GetBytes(e, "context.partial_state").Bool(); got != partialRoom {
+			t.Errorf("entry %d: partial_state %v", i, got)
+		}
 		if gjson.GetBytes(e, "outlier").Bool() || gjson.GetBytes(e, "rejected_reason").Type != gjson.Null {
 			t.Errorf("entry %d: outlier or rejected: %s", i, e)
 		}

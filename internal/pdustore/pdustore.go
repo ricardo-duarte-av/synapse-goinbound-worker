@@ -28,7 +28,7 @@ var Tables = []string{
 	"event_auth_chains", "event_auth_chain_links", "server_signature_keys", "redactions",
 	// MSC4293 redactions, honoured when Synapse loads an event.
 	"room_ban_redactions",
-	"event_forward_extremities", "current_state_events", "partial_state_rooms",
+	"event_forward_extremities", "current_state_events", "partial_state_rooms", "partial_state_events",
 	"federation_inbound_events_staging", "state_groups",
 	// The push check.
 	"local_current_membership", "room_memberships", "push_rules", "push_rules_enable",
@@ -867,4 +867,19 @@ func (s *Store) EventsMetadata(ctx context.Context, ids []string) (map[string]Ev
 		out[id] = m
 	}
 	return out, rows.Err()
+}
+
+const qPartialStateEvents = `SELECT EXISTS (SELECT 1 FROM partial_state_events WHERE event_id = ANY($1))`
+
+// AnyPartialState is any(get_partial_state_events(ids).values()): whether
+// any of the events has partial state.
+func (s *Store) AnyPartialState(ctx context.Context, ids []string) (bool, error) {
+	var any bool
+	if len(ids) == 0 {
+		return false, nil
+	}
+	if err := s.pool.QueryRow(ctx, qPartialStateEvents, uniqueIDs(ids)).Scan(&any); err != nil {
+		return false, fmt.Errorf("pdustore: partial state events: %w", err)
+	}
+	return any, nil
 }

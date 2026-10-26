@@ -556,6 +556,7 @@ func (d *Decision) sendEntry(staged []byte, before, after int64) (sendEntry, err
 			Rejected:              rejected,
 			StateGroupDeltas:      deltas,
 			StateDeltaDueToEvent:  encodeStateDict(dueToEvent),
+			PartialState:          d.PartialState,
 		},
 	}, nil
 }

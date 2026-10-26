@@ -227,6 +227,16 @@ var ErrMissingAuth = &pdu.RaiseError{Msg: "missing auth events"}
 // validate_event_for_room_version comes first: the field size limits, then
 // the signature presence checks.
 func (s *Verifier) checkEventAuth(ctx context.Context, ev *pdu.Event, before pdu.StateMap) (bool, string, error) {
+	partial, err := s.st.AnyPartialState(ctx, ev.PrevEvents)
+	if err != nil {
+		return false, "", err
+	}
+	return s.checkEventAuthPartial(ctx, ev, before, partial)
+}
+
+// checkEventAuthPartial is checkEventAuth with the context's partial_state
+// given.
+func (s *Verifier) checkEventAuthPartial(ctx context.Context, ev *pdu.Event, before pdu.StateMap, partial bool) (bool, string, error) {
 	if se := pdu.CheckFieldSizes(ev); se != nil {
 		if se.Unpersistable {
 			// Synapse raises, and never stores the event.
@@ -264,7 +274,22 @@ func (s *Verifier) checkEventAuth(ctx context.Context, ev *pdu.Event, before pdu
 		return false, "", err
 	}
 
-	calculated, err := pdu.ComputeAuthEvents(ev.Room, ev, before)
+	// With partial state, some of the state needed may be missing: the
+	// claimed auth events are resolved against the state known, so that
+	// bans and the like still apply.
+	forAuth := before
+	if partial {
+		claimedMap := pdu.StateMap{}
+		for _, e := range claimedList {
+			if e.StateKey != nil {
+				claimedMap[e.Key()] = e.ID
+			}
+		}
+		if forAuth, err = stateres.ResolveWith(ctx, ev.RoomID, ev.Room, []pdu.StateMap{before, claimedMap}, s.st, s.opts); err != nil {
+			return false, "", err
+		}
+	}
+	calculated, err := pdu.ComputeAuthEvents(ev.Room, ev, forAuth)
 	if err != nil {
 		return false, "", err
 	}

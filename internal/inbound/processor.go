@@ -15,6 +15,7 @@ import (
 
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pdu"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pduverify"
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/replication"
 )
 
 // Deciding is what the processor needs from the PDU checker.
@@ -447,6 +448,8 @@ func (p *Processor) handle(ctx context.Context, room string, rv *pdu.RoomVersion
 		}
 		d, err = p.decide.Decide(ctx, in)
 	}
+	retried := false
+decided:
 	if err == nil && d.Defer == pduverify.DeferMissingAuth && p.missing != nil {
 		if aerr := p.remoteAuthChain(ctx, s.Origin, rv, d.Event); aerr != nil {
 			log.Info().Err(aerr).Msg("Write mode: leaving an event with missing auth events to Synapse")
@@ -498,6 +501,21 @@ func (p *Processor) handle(ctx context.Context, room string, rv *pdu.RoomVersion
 	}
 
 	if err := p.write(ctx, room, s, d); err != nil {
+		if errors.Is(err, replication.ErrPartialStateConflict) {
+			if !retried {
+				// on_receive_pdu's PartialStateConflictError: the room was
+				// un-partial stated meanwhile; the context is computed
+				// again, and the event handled once more.
+				log.Info().Msg("Room was un-partial stated while processing the PDU, trying again.")
+				retried = true
+				d, err = p.decide.Decide(ctx, in)
+				goto decided
+			}
+			// A second conflict escapes: "Failed to handle PDU".
+			log.Error().Err(err).Msg("Failed to handle PDU")
+			handled.WithLabelValues("failed").Inc()
+			return outcomeDone
+		}
 		log.Warn().Err(err).Msg("Write mode: persisting failed; leaving the event to Synapse")
 		handled.WithLabelValues("error").Inc()
 		return outcomeDefer

@@ -113,14 +113,21 @@ event must end up persisted exactly once, with nothing left staged.
   `goinbound_pdu_plan_shadow_total{reason}` (`ok`: it would have served it).
   That is the list of what still needs Python under `native`.
 
-- Partial state rooms are deferred. The only long-lived one, a v1 room
-  that could not be joined (`!cURbafjkfsMDVwdRDQ:matrix.org`), was deleted by the
-  operator on 2026-10-16.
-- Guest-access changes that would make local guests leave are deferred
-  (none are in any room).
-- Partial state rooms do occur: a room is partial while someone joins it.
-  One event was deferred at 09:45 on 2026-10-20, and the sweep nudge got
-  Python to persist it 1.5s later.
+- Partial state rooms (a room is partial while someone here joins it) are
+  handled as Synapse handles them: the context's `partial_state` when a
+  prev event has partial state (`partial_state_events`; on the missing
+  prevs path, the prevs held), auth against the state before resolved
+  with the claimed auth events, no soft-fail while the room is partial,
+  and the persister's 409 (the room was un-partial stated meanwhile)
+  answered by deciding and writing once more; a second 409, or a pulled
+  event still partial after it, fails the event, as Synapse's exceptions
+  do.
+- Guest-access changes that would make local guests leave are deferred:
+  making them leave is local event creation (`kick_guest_users` sends a
+  leave for each), not ported. It cannot happen here: `allow_guest_access`
+  is false, and none of the 79 guest accounts (all from before 2023-11) is
+  in a room. With no local guest in the room, as always here, Synapse does
+  nothing, and neither do we.
 - A signing key nobody holds valid at the event's time (a dead server's,
   expired) is decided as Synapse decides it, on `/send` and for pulled
   events alike: "Failed to find any key to satisfy: _FetchKeyRequest(...)",

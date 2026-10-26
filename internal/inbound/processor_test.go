@@ -14,6 +14,7 @@ import (
 
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pdu"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pduverify"
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/replication"
 )
 
 // fakeDecide decides by the staged event's "test" field.
@@ -58,6 +59,8 @@ type fakePersist struct {
 	mu   sync.Mutex
 	sent []json.RawMessage
 	fail bool
+	// conflicts is how many sends answer 409 first.
+	conflicts int
 }
 
 func (f *fakePersist) SendEvents(_ context.Context, _ string, entries []json.RawMessage, _ bool) error {
@@ -65,6 +68,10 @@ func (f *fakePersist) SendEvents(_ context.Context, _ string, entries []json.Raw
 	defer f.mu.Unlock()
 	if f.fail {
 		return errors.New("persister down")
+	}
+	if f.conflicts > 0 {
+		f.conflicts--
+		return replication.ErrPartialStateConflict
 	}
 	f.sent = append(f.sent, entries...)
 	return nil
@@ -215,6 +222,32 @@ func TestProcessorFailsAnEventWhoseResolutionRaises(t *testing.T) {
 	adminConn(t).QueryRow(ctx, `SELECT count(*) FROM state_groups WHERE event_id = '$1'`).Scan(&n)
 	if n != 0 {
 		t.Errorf("%d state groups stored", n)
+	}
+}
+
+// The persister's 409 (the room was un-partial stated meanwhile): decided
+// and written once more; a second one fails the event, as in Synapse.
+func TestProcessorRetriesAPartialStateConflict(t *testing.T) {
+	for _, c := range []struct {
+		conflicts, decisions, sent int
+	}{{1, 2, 1}, {2, 2, 0}} {
+		ctx := context.Background()
+		d := testDB(t, "goinbound-test")
+		base, _ := d.StoreStateGroup(ctx, "$create", "!r:x", 0, nil, pdu.StateMap{{Type: "m.room.create"}: "$create"}, nil)
+		dec, per := &fakeDecide{base: base}, &fakePersist{conflicts: c.conflicts}
+		p := NewProcessor(d, dec, per, fakeRead{}, "x", zerolog.Nop())
+		if err := p.Received(ctx, "y", "!r:x", "$1", v1Event("$1", "", 1), []byte(`{}`)); err != nil {
+			t.Fatal(err)
+		}
+		waitFor(t, "unstaged", func() bool { s, _ := d.NextStaged(ctx, "!r:x"); return s == nil })
+		dec.mu.Lock()
+		per.mu.Lock()
+		if len(dec.order) != c.decisions || len(per.sent) != c.sent || p.isDeferred("!r:x") {
+			t.Errorf("%d conflicts: %d decisions, %d sent, deferred %v", c.conflicts, len(dec.order), len(per.sent), p.isDeferred("!r:x"))
+		}
+		per.mu.Unlock()
+		dec.mu.Unlock()
+		p.Close()
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pdu"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pdustore"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pduverify"
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/replication"
 )
 
 // The missing prev events path of on_receive_pdu
@@ -202,6 +203,12 @@ func (p *Processor) processPulledEvents(ctx context.Context, origin string, rv *
 
 // processPulledEvent is _process_pulled_event.
 func (p *Processor) processPulledEvent(ctx context.Context, origin string, rv *pdu.RoomVersion, pe *fedfetch.Pulled) error {
+	return p.processPulled(ctx, origin, rv, pe, false)
+}
+
+// processPulled is processPulledEvent; retried is the second attempt after
+// a PartialStateConflictError.
+func (p *Processor) processPulled(ctx context.Context, origin string, rv *pdu.RoomVersion, pe *fedfetch.Pulled, retried bool) error {
 	m := p.missing
 	ev := pe.Event
 	room := ev.RoomID
@@ -235,6 +242,7 @@ func (p *Processor) processPulledEvent(ctx context.Context, origin string, rv *p
 	}
 
 	var stateBefore pdu.StateMap
+	partial := false
 	if len(missing) > 0 {
 		st, err := p.stateAcrossMissingPrevs(ctx, origin, rv, ev, seen, missing)
 		if errors.Is(err, errUncertain) {
@@ -247,6 +255,16 @@ func (p *Processor) processPulledEvent(ctx context.Context, origin string, rv *p
 			return p.db.RecordFailedPull(ctx, room, pe.ID, "ERROR 403: We can't get valid state history.")
 		}
 		stateBefore = st
+		// partial_state_flags of the prevs held.
+		var held []string
+		for _, prev := range ev.PrevEvents {
+			if seen[prev] {
+				held = append(held, prev)
+			}
+		}
+		if partial, err = m.Store.AnyPartialState(ctx, held); err != nil {
+			return err
+		}
 	}
 
 	meta, err := json.Marshal(pe.Metadata)
@@ -255,9 +273,14 @@ func (p *Processor) processPulledEvent(ctx context.Context, origin string, rv *p
 	}
 	in := pduverify.DecideInput{
 		Origin: origin, EventJSON: pe.Raw, Metadata: meta, EventID: pe.ID,
-		Room: rv, OurServer: p.server, Cache: p.cache, StateBefore: stateBefore,
+		Room: rv, OurServer: p.server, Cache: p.cache, StateBefore: stateBefore, PartialState: partial,
 	}
 	d, err := m.Verifier.Decide(ctx, in)
+	if err == nil && retried && d.PartialState {
+		// "Event ... still has a partial resolved state after room ... was
+		// un-partial stated": an AssertionError, which escapes.
+		return fmt.Errorf("%w: pulled %s still has partial state after its room was un-partial stated", errFailed, pe.ID)
+	}
 	if err == nil && d.Defer == pduverify.DeferMissingAuth {
 		if err := p.remoteAuthChain(ctx, origin, rv, ev); err != nil {
 			return err
@@ -290,6 +313,14 @@ func (p *Processor) processPulledEvent(ctx context.Context, origin string, rv *p
 	}
 	s := &Staged{Origin: origin, EventID: pe.ID, EventJSON: pe.Raw, InternalMetadata: meta}
 	if err := p.write(ctx, room, s, d); err != nil {
+		if errors.Is(err, replication.ErrPartialStateConflict) {
+			if !retried {
+				// The room was un-partial stated meanwhile: the context
+				// is computed again, with full state this time.
+				return p.processPulled(ctx, origin, rv, pe, true)
+			}
+			return fmt.Errorf("%w: pulled %s: a second partial state conflict", errFailed, pe.ID)
+		}
 		return fmt.Errorf("%w: persisting pulled %s: %v", errUncertain, pe.ID, err)
 	}
 	pulledEvents.Inc()

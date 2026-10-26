@@ -182,6 +182,9 @@ type DecideInput struct {
 	// (_compute_event_context_with_maybe_missing_prevs). It is stored in
 	// full, and soft-fail resolves it against the forward extremities.
 	StateBefore pdu.StateMap
+	// PartialState, with StateBefore, is whether any prev held has
+	// partial state (_compute_event_context_with_maybe_missing_prevs).
+	PartialState bool
 }
 
 // Decision is what to do with a staged event.
@@ -200,6 +203,10 @@ type Decision struct {
 	// Defer: write mode does not do this exactly as Synapse would, so the
 	// event stays staged for Synapse's own inbound worker.
 	Ignore, Drop, Raise, Defer string
+
+	// PartialState is the context's partial_state: a prev event has partial
+	// state.
+	PartialState bool
 
 	Event *pdu.Event
 	// Groups are the prev events' distinct state groups, the cache key.
@@ -322,9 +329,11 @@ func (s *Verifier) Decide(ctx context.Context, in DecideInput) (*Decision, error
 		d.Defer = "missing prevs"
 		return d, nil
 	}
-	if snap.PartialState {
-		d.Defer = "partial state room"
-		return d, nil
+	// calculate_context_info: partial if any prev event is.
+	if in.StateBefore != nil {
+		d.PartialState = in.PartialState
+	} else if d.PartialState, err = s.st.AnyPartialState(ctx, ev.PrevEvents); err != nil {
+		return nil, err
 	}
 
 	// compute_event_context: the state before, through the cache, or as
@@ -346,7 +355,7 @@ func (s *Verifier) Decide(ctx context.Context, in DecideInput) (*Decision, error
 	}
 
 	// _check_event_auth.
-	rej, why, err := s.checkEventAuth(ctx, ev, d.Before)
+	rej, why, err := s.checkEventAuthPartial(ctx, ev, d.Before, d.PartialState)
 	if err != nil {
 		if errors.Is(err, ErrMissingAuth) {
 			// Synapse fetches them from the origin, which the processor
@@ -380,7 +389,10 @@ func (s *Verifier) Decide(ctx context.Context, in DecideInput) (*Decision, error
 		d.Metadata["recheck_redaction"] = true
 	}
 	d.SoftFailed = meta["soft_failed"] == true
-	if !rej && !snap.PrevsInTimeline {
+	if snap.PartialState {
+		// _check_for_soft_fail: nothing is soft-failed in a room with
+		// partial state.
+	} else if !rej && !snap.PrevsInTimeline {
 		// _check_for_soft_fail with missing prevs: "current state" is a
 		// resolution across the forward extremities and the state before.
 		soft, err := s.softFailedWithGap(ctx, ev, snap, d.Before)
