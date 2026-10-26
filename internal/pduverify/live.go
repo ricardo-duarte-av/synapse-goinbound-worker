@@ -437,8 +437,19 @@ func (l *Live) check(j *job) {
 	}
 	var before pdu.StateMap
 	var replayed *Result
+	// Prevs the snapshot saw in the timeline were there when Synapse
+	// computed the event's context: it waited for them first.
+	held := j.snap != nil && j.snap.PrevsInTimeline && !j.snap.EventPresent
 	replay := func(ctx context.Context, id string) *Result {
 		r := l.v.Replay(ctx, id)
+		if r.Outcome == OutcomeMismatch && !held {
+			// Prevs missing on arrival: Synapse may have resolved them
+			// with a remote's /state_ids, which a replay from our prevs
+			// cannot reproduce (as the state_groups check allows).
+			if f, err := l.v.FetchedBefore(ctx, id); err == nil && f {
+				return r.fail(OutcomeSkipped, "stored in full: prevs may have been missing")
+			}
+		}
 		if r.Outcome == OutcomeMatch {
 			// Push and the state group check build on Replay, when it
 			// agrees with Synapse.
@@ -450,9 +461,6 @@ func (l *Live) check(j *job) {
 		if replayed == nil {
 			return &Result{EventID: id, Outcome: OutcomeSkipped, Reason: "state_auth did not match"}
 		}
-		// Prevs the snapshot saw in the timeline were there when Synapse
-		// computed the event's context: it waited for them first.
-		held := j.snap != nil && j.snap.PrevsInTimeline && !j.snap.EventPresent
 		return l.v.StateGroups(ctx, replayed, held)
 	}
 	var groups, soft, policy *Result

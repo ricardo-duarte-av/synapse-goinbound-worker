@@ -720,6 +720,14 @@ func (s *Verifier) CheckDecision(ctx context.Context, id string, d *Decision, sn
 				// The mirror of "resolution cached by Synapse".
 				return res.fail(OutcomeSkipped, "resolution not cached by Synapse")
 			}
+			// Two prev groups with the very state resolved: Synapse reuses
+			// the first in Python set order (_make_state_cache_entry), which
+			// write mode does not reproduce. Either group is the state.
+			if same, err := s.sameGroups(ctx, g, before); err != nil {
+				return res.fail(OutcomeError, err.Error())
+			} else if same {
+				return res.fail(OutcomeSkipped, "tie")
+			}
 			diffs = append(diffs, fmt.Sprintf("group before: ours %d, Synapse %d (%s)", g, before, why))
 		}
 	} else {
@@ -964,4 +972,17 @@ func RedactedStagedEvent(raw []byte, rv *pdu.RoomVersion, received time.Time) ([
 		return nil, err
 	}
 	return pdu.Redact(staged, rv)
+}
+
+// sameGroups says two state groups hold the same state.
+func (s *Verifier) sameGroups(ctx context.Context, a, b int64) (bool, error) {
+	ma, err := s.groups.get(ctx, s.st, a)
+	if err != nil {
+		return false, err
+	}
+	mb, err := s.groups.get(ctx, s.st, b)
+	if err != nil {
+		return false, err
+	}
+	return sameStateMap(ma, mb), nil
 }

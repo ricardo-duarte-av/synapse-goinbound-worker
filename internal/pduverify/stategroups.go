@@ -356,3 +356,33 @@ func (s *Verifier) storedAs(ctx context.Context, group int64, event string, plan
 	}
 	return "", nil
 }
+
+// FetchedBefore says the state before the event is a group stored in full
+// for it: what Synapse stores when it took the state from a remote's
+// /state_ids for missing prevs (calculate_context_info with
+// state_ids_before_event). For a state event whose group after is itself in
+// full, the group before is not recorded, and that counts too.
+func (s *Verifier) FetchedBefore(ctx context.Context, id string) (bool, error) {
+	got, _, err := s.st.GetStoredEvents(ctx, []string{id})
+	if err != nil || got[id] == nil {
+		return false, err
+	}
+	ev := got[id].Event
+	g, err := s.st.StateGroupForEvent(ctx, id)
+	if err != nil {
+		return false, err
+	}
+	if ev.IsState() && !ev.Rejected {
+		prev, hasPrev, _, err := s.st.StateDelta(ctx, g)
+		if err != nil || !hasPrev {
+			return !hasPrev, err
+		}
+		g = prev
+	}
+	creator, err := s.st.StateGroupEvent(ctx, g)
+	if err != nil || creator != id {
+		return false, err
+	}
+	_, hasPrev, _, err := s.st.StateDelta(ctx, g)
+	return !hasPrev, err
+}

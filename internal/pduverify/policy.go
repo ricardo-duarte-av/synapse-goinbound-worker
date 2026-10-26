@@ -145,6 +145,12 @@ func (s *Verifier) CheckPolicy(ctx context.Context, id string, raw []byte, v Pol
 	if err != nil {
 		return res.fail(OutcomeError, err.Error())
 	}
+	if r, _ := meta["redacted"].(bool); r {
+		// The copy Synapse persisted failed its content hash and was
+		// pruned, so no policy server was asked: one that arrived another
+		// way than the transaction we judged (a pull, say).
+		return res.fail(OutcomeSkipped, "redacted on receipt")
+	}
 	_, refused := meta["policy_server_spammy"]
 	added := v.Server != "" && !sameJSON(gjson.GetBytes(raw, "signatures").Get(gjson.Escape(v.Server)).Raw,
 		gjson.GetBytes(se.JSON, "signatures").Get(gjson.Escape(v.Server)).Raw)

@@ -181,6 +181,14 @@ things that are not derivable from the code.
   dropped it, while our snapshot, taken once they came in by other
   transactions, decides to persist (2026-10-19, `!ping12…`). Skipped as
   "prevs arrived after it".
+- **A PDU dropped on `/send` can be persisted later, by a pull.** When a
+  sender won't divulge a prev, the event is dropped (by us or Synapse
+  alike), and a later event's `/get_missing_events` brings it in. The
+  shadow then judges the transaction's copy against the pulled one:
+  its state may come from a remote's `/state_ids` (stored in full), its
+  copy may be pruned for a bad hash (no policy ask), and two prev groups
+  may hold identical state (a set-order tie). All three seen in the ping
+  room and Matrix HQ on 2026-10-23/24; each is skipped, not a mismatch.
 - **Matrix HQ's missing prevs store full groups**: ~13.6k rows each, 364
   in one day (2026-10-14). Synapse's missing-prevs path passes the
   fetched state as `state_ids_before_event`, which never becomes a delta.
