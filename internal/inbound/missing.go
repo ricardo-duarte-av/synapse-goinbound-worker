@@ -293,6 +293,7 @@ func (p *Processor) processPulledEvent(ctx context.Context, origin string, rv *p
 		return fmt.Errorf("%w: persisting pulled %s: %v", errUncertain, pe.ID, err)
 	}
 	pulledEvents.Inc()
+	p.after.Pulled(pe.ID, stateBefore != nil)
 	if d.ResyncDevices != "" && d.Rejected == "" {
 		p.resync(d.ResyncDevices)
 	}
@@ -581,6 +582,7 @@ func (p *Processor) authAndPersistOutliers(ctx context.Context, room string, pul
 	}
 
 	var entries []json.RawMessage
+	var entryIDs []string
 	for _, id := range order {
 		e := byID[id]
 		rej, drop, err := pduverify.OutlierVerdict(e.Event, authMap)
@@ -599,6 +601,7 @@ func (p *Processor) authAndPersistOutliers(ctx context.Context, room string, pul
 			return err
 		}
 		entries = append(entries, entry)
+		entryIDs = append(entryIDs, id)
 	}
 	for i := 0; i < len(entries); i += 1000 {
 		batch := entries[i:min(i+1000, len(entries))]
@@ -606,6 +609,9 @@ func (p *Processor) authAndPersistOutliers(ctx context.Context, room string, pul
 			return fmt.Errorf("%w: persisting outliers: %v", errUncertain, err)
 		}
 		outliersPersisted.Add(float64(len(batch)))
+		for _, id := range entryIDs[i:min(i+1000, len(entryIDs))] {
+			p.after.Outlier(id)
+		}
 	}
 	return nil
 }

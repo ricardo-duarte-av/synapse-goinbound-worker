@@ -65,6 +65,8 @@ type Processor struct {
 	spacing    time.Duration
 	// onDefer is told whenever an event is left to Synapse.
 	onDefer func()
+	// after checks what the missing events path persists, once written.
+	after *pduverify.AfterWrite
 }
 
 type attempt struct {
@@ -102,6 +104,10 @@ func NewProcessor(db *DB, d Deciding, p Persisting, r Reading, server string, lo
 		ctx: ctx, cancel: cancel, deferred: map[string]deferral{}, attempts: map[string]attempt{}, spacing: fallbackSpacing,
 	}
 }
+
+// VerifyAfterWrite has what the missing events path persists checked
+// once written (pulled events, outliers).
+func (p *Processor) VerifyAfterWrite(a *pduverify.AfterWrite) { p.after = a }
 
 // OnDefer sets what is called whenever an event is left staged for Synapse
 // (write.fallback: synapse): the sweep nudge, so that some Synapse process is

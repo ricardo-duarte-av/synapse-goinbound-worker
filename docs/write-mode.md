@@ -80,7 +80,7 @@ Everything else goes through Synapse's replication endpoints:
 | 11 | State resolution v1 | **done** (ported earlier, `a4f5864`); rejected events now left out, as v1's state_map_factory does. v1 forks are rare: 8 in the last 2M stream orderings, all matching |
 | 14 | Signing keys Synapse does not hold yet | **done** (`internal/keyring`: Synapse's order, notaries merged, then the origin); kept in memory, not stored, since storing means invalidating Synapse's caches over replication |
 | 15 | Push on invites of local users: MSC4380 and MSC4155 invite config | **done** (`inviteAllowed`); checked live by the push check |
-| 12 | Verification in reverse: after Go writes, re-derive and compare | todo |
+| 12 | Verification in reverse: after Go writes, re-derive and compare | **done**: PDUs received on `/send` are checked by the live shadow against what our writer stored; what the missing events path persists, which no shadow sees, by `pduverify.AfterWrite` (pulled events replayed, or re-authed against their stored state; outliers re-authed against their stored auth events), `goinbound_write_verify_total{check,outcome}`, a mismatch logged at WARN |
 | 13 | A/B replay on two copies of a snapshot | **dropped**: a second Synapse needs our server name and signing key, and anything it sent out would look like a second homeserver to the network (operator, 2026-10-26) |
 
 ## Testing the fetch path

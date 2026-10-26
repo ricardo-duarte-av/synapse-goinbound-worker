@@ -293,6 +293,7 @@ func buildHandler(ctx context.Context, cfg *config.Config, up *proxy.Proxy, log 
 	}
 	var proc *inbound.Processor
 	var limiter *backoff.Limiter
+	var afterWrite *pduverify.AfterWrite
 	var handler atomic.Pointer[txn.Handler]
 	var wdb *inbound.DB
 	if cfg.Modes.PDU.ServesNatively() {
@@ -356,6 +357,10 @@ func buildHandler(ctx context.Context, cfg *config.Config, up *proxy.Proxy, log 
 				}
 			}
 			proc.EnableMissingEvents(&inbound.MissingDeps{Fetch: fetcher, Store: pst, Verifier: pv})
+			// What that path persists, no /send shadow sees: checked
+			// again once written.
+			afterWrite = pduverify.NewAfterWrite(pv, 1000, log)
+			proc.VerifyAfterWrite(afterWrite)
 			log.Info().Msg("Write mode fetches missing prev events from the origin")
 		}
 		deps := inbound.FrontDoorDeps{
@@ -410,6 +415,7 @@ func buildHandler(ctx context.Context, cfg *config.Config, up *proxy.Proxy, log 
 		}
 		if proc != nil {
 			proc.Close()
+			afterWrite.Close()
 			wdb.Close()
 		}
 		if live != nil {

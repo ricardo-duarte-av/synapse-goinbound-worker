@@ -353,6 +353,16 @@ func runMissingPrevs(t *testing.T, originHasIt, gap bool) {
 	per := &fakePersister{t: t, c: c, stream: 100}
 	p := NewProcessor(d, v, per, pst, "local.test", zerolog.New(zerolog.NewTestWriter(t)))
 	p.EnableMissingEvents(&MissingDeps{Fetch: fedfetch.New(fc, pst, v, nil, "local.test", nil), Store: pst, Verifier: v})
+	after := pduverify.NewAfterWrite(v, 100, zerolog.New(zerolog.NewTestWriter(t)))
+	var amu2 sync.Mutex
+	checked := map[string]string{} // event ID -> check outcome
+	after.OnResult = func(check string, r *pduverify.Result) {
+		amu2.Lock()
+		checked[r.EventID+" "+check] = r.Outcome + " " + r.Reason
+		amu2.Unlock()
+	}
+	defer after.Close()
+	p.VerifyAfterWrite(after)
 	defer p.Close()
 
 	if frontDoor {
@@ -494,6 +504,25 @@ func runMissingPrevs(t *testing.T, originHasIt, gap bool) {
 			t.Fatalf("persisted %v, want %v", per.order, want)
 		}
 	}
+	// What the missing events path wrote is checked again: M2 by replay
+	// (prevs held) or against its stored state (remote state), X as an
+	// outlier.
+	wantChecks := map[string]string{m2ID + " state_auth": "match ", m2ID + " state_groups": "match "}
+	if gap {
+		wantChecks = map[string]string{m2ID + " auth_at_stored": "match ", xID + " outlier_auth": "match "}
+	}
+	waitFor(t, "after-write checks", func() bool {
+		amu2.Lock()
+		defer amu2.Unlock()
+		return len(checked) >= len(wantChecks)
+	})
+	amu2.Lock()
+	for k, w := range wantChecks {
+		if checked[k] != w {
+			t.Errorf("after-write %s: %q, want %q (all: %v)", k, checked[k], w, checked)
+		}
+	}
+	amu2.Unlock()
 	if gap {
 		// X is an outlier, persisted backfilled; M2's state came from the
 		// origin and is stored in full, a new group with the room's state.
@@ -507,6 +536,11 @@ func runMissingPrevs(t *testing.T, originHasIt, gap bool) {
 		}
 		if st, err := pst.StateForGroup(ctx, m2g); err != nil || len(st) != 5 {
 			t.Errorf("M2's group %d: %v %v", m2g, st, err)
+		}
+		// A rejection written where auth passes is caught.
+		must(`INSERT INTO rejections (event_id, reason, last_check) VALUES ($1, 'auth_error', 1)`, xID)
+		if r := v.OutlierAuth(ctx, xID); r.Outcome != pduverify.OutcomeMismatch {
+			t.Errorf("a wrong rejection: %s %s", r.Outcome, r.Reason)
 		}
 		amu.Lock()
 		t.Logf("asked: %v", asked)
