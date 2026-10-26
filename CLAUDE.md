@@ -7,10 +7,13 @@ things that are not derivable from the code.
 
 ## The deployment
 
-- `aguiarvieira.pt`. The Python worker `av-inbound-federation-worker-1` stays
-  up as the upstream, on `/var/sockets/nginx/av-inbound-federation-worker-1.sock`.
-  nginx currently routes `^/_matrix/federation/v1/send/` to it via upstream
-  `av-inbound-federation-workers-ih` (in `/opt/npm/data/nginx/custom/http_top.conf`).
+- `aguiarvieira.pt`. Since 2026-10-26 22:52 both modes are `native`, and the
+  upstream (fallback) is **main**, on `/var/sockets/nginx/av-synapse-main.sock`.
+  The Python worker `av-inbound-federation-worker-1` is still up but receives
+  no `/send`; the operator will remove it. Main only gets what we proxy
+  (auth failures whose words we don't reproduce, deferred events via the
+  sweep nudge), so a rising `FederationSendServlet` rate on main is the
+  thing to watch.
 - Every stream writer is `av-edu-worker`. Presence is **untracked**, so ~340k of
   the 410k EDUs a day are dropped on arrival.
 - The `inbound-federation` Prometheus job also scrapes `matrixbridg.es`. Always
