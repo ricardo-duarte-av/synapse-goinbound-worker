@@ -19,6 +19,7 @@ import (
 	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/federation"
 
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/backoff"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/fedclient"
 )
 
@@ -34,6 +35,9 @@ const Timeout = 30 * time.Second
 type Client struct {
 	fed     *federation.Client
 	timeout time.Duration // Timeout; shorter in tests
+	// Backoff is the destination retry limiter (ignore_backoff=True: a
+	// success clears a backoff, a failure adds none); nil for none.
+	Backoff *backoff.Limiter
 }
 
 // New builds a client signing as serverName with a Synapse-format key line
@@ -98,15 +102,20 @@ func (c *Client) post(ctx context.Context, server string, path mautrix.BaseURLPa
 		body []byte
 		resp *http.Response
 	}
-	a, err := fedclient.Attempt(ctx, c.timeout, func(ctx context.Context) (answer, error) {
-		body, resp, err := c.fed.MakeFullRequest(ctx, federation.RequestParams{
-			ServerName:   server,
-			Method:       http.MethodPost,
-			Path:         path,
-			Authenticate: true,
-			RequestJSON:  event,
+	var a answer
+	err := c.Backoff.Do(ctx, server, backoff.Options{IgnoreBackoff: true}, func() (*http.Response, error) {
+		var err error
+		a, err = fedclient.Attempt(ctx, c.timeout, func(ctx context.Context) (answer, error) {
+			body, resp, err := c.fed.MakeFullRequest(ctx, federation.RequestParams{
+				ServerName:   server,
+				Method:       http.MethodPost,
+				Path:         path,
+				Authenticate: true,
+				RequestJSON:  event,
+			})
+			return answer{body, resp}, err
 		})
-		return answer{body, resp}, err
+		return a.resp, err
 	})
 	body, resp := a.body, a.resp
 	if resp != nil && resp.StatusCode >= 300 {

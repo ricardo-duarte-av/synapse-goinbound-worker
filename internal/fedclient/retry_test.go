@@ -1,4 +1,4 @@
-package fedfetch
+package fedclient
 
 import (
 	"context"
@@ -29,7 +29,7 @@ func TestRetryingAsSynapsesShortRetries(t *testing.T) {
 	}
 	for _, c := range cases {
 		n := 0
-		err := retrying(context.Background(), func(context.Context) (*http.Response, error) {
+		_, err := Retrying(context.Background(), func(context.Context) (*http.Response, error) {
 			n++
 			return c.resp, fail
 		})
@@ -40,7 +40,7 @@ func TestRetryingAsSynapsesShortRetries(t *testing.T) {
 
 	// Success on a later attempt ends it.
 	n := 0
-	err := retrying(context.Background(), func(context.Context) (*http.Response, error) {
+	_, err := Retrying(context.Background(), func(context.Context) (*http.Response, error) {
 		if n++; n < 3 {
 			return nil, fail
 		}
@@ -56,7 +56,7 @@ func TestRetryingAsSynapsesShortRetries(t *testing.T) {
 	attemptTimeout = 20 * time.Millisecond
 	n = 0
 	start := time.Now()
-	err = retrying(context.Background(), func(actx context.Context) (*http.Response, error) {
+	_, err = Retrying(context.Background(), func(actx context.Context) (*http.Response, error) {
 		n++
 		<-actx.Done()
 		return nil, actx.Err()
@@ -68,7 +68,7 @@ func TestRetryingAsSynapsesShortRetries(t *testing.T) {
 	// The caller giving up stops the retries.
 	ctx, cancel := context.WithCancel(context.Background())
 	n = 0
-	_ = retrying(ctx, func(context.Context) (*http.Response, error) {
+	_, _ = Retrying(ctx, func(context.Context) (*http.Response, error) {
 		n++
 		cancel()
 		return nil, fail

@@ -92,6 +92,10 @@ type Config struct {
 	// Database is Synapse's PostgreSQL connection.
 	Database Database
 
+	// Backoff is federation's destination retry settings
+	// (config/federation.py).
+	Backoff Backoff
+
 	// Redis is the replication bus, on which commands such as
 	// REMOTE_SERVER_UP are published to the channel named server_name
 	// (replication/tcp/redis.py).
@@ -151,6 +155,12 @@ type raw struct {
 	UsePresence any `yaml:"use_presence"`
 
 	FederationDomainWhitelist []string `yaml:"federation_domain_whitelist"`
+
+	Federation struct {
+		MinRetryInterval any `yaml:"destination_min_retry_interval"`
+		RetryMultiplier  any `yaml:"destination_retry_multiplier"`
+		MaxRetryInterval any `yaml:"destination_max_retry_interval"`
+	} `yaml:"federation"`
 
 	ExperimentalFeatures  yaml.Node `yaml:"experimental_features"`
 	AppServiceConfigFiles []string  `yaml:"app_service_config_files"`
@@ -243,6 +253,10 @@ func parse(b []byte, path string) (*Config, error) {
 		for _, d := range r.FederationDomainWhitelist {
 			cfg.DomainWhitelist[d] = true
 		}
+	}
+
+	if cfg.Backoff, err = backoffConfig(r); err != nil {
+		return nil, err
 	}
 
 	if r.TrustedKeyServers == nil {
@@ -662,4 +676,67 @@ func (w Writers) EventsWriter(roomID string) string {
 	slices.Reverse(sum[:])
 	n := new(big.Int).SetBytes(sum[:])
 	return w.Events[new(big.Int).Mod(n, big.NewInt(int64(len(w.Events)))).Int64()]
+}
+
+// Backoff is how long Synapse waits before retrying a failing destination:
+// Min first, then times Multiplier (and uniform(0.8, 1.4)), up to Max.
+type Backoff struct {
+	MinMS      int64
+	Multiplier float64
+	MaxMS      int64
+}
+
+// backoffConfig is FederationConfig's destination_* settings: 10m, 2, 7d,
+// the max capped at 2**62.
+func backoffConfig(r raw) (Backoff, error) {
+	b := Backoff{MinMS: 10 * 60 * 1000, Multiplier: 2, MaxMS: 7 * 24 * 3600 * 1000}
+	f := r.Federation
+	var err error
+	if f.MinRetryInterval != nil {
+		if b.MinMS, err = ParseDuration(f.MinRetryInterval); err != nil {
+			return b, fmt.Errorf("federation.destination_min_retry_interval: %w", err)
+		}
+	}
+	if f.MaxRetryInterval != nil {
+		if b.MaxMS, err = ParseDuration(f.MaxRetryInterval); err != nil {
+			return b, fmt.Errorf("federation.destination_max_retry_interval: %w", err)
+		}
+	}
+	b.MaxMS = min(b.MaxMS, 1<<62)
+	switch m := f.RetryMultiplier.(type) {
+	case nil:
+	case int:
+		b.Multiplier = float64(m)
+	case float64:
+		b.Multiplier = m
+	default:
+		return b, fmt.Errorf("federation.destination_retry_multiplier: %v is not a number", m)
+	}
+	return b, nil
+}
+
+// ParseDuration is Config.parse_duration: an int is milliseconds; a string
+// is digits with an optional s, m, h, d, w or y suffix (none: ms).
+func ParseDuration(v any) (int64, error) {
+	switch d := v.(type) {
+	case int:
+		return int64(d), nil
+	case string:
+		sizes := map[byte]int64{'s': 1000, 'm': 60000, 'h': 3600000, 'd': 86400000, 'w': 7 * 86400000, 'y': 365 * 86400000}
+		if d == "" {
+			return 0, fmt.Errorf("empty duration")
+		}
+		size := int64(1)
+		if n, ok := sizes[d[len(d)-1]]; ok {
+			size, d = n, d[:len(d)-1]
+		} else if c := d[len(d)-1]; c < '0' || c > '9' {
+			return 0, fmt.Errorf("bad duration suffix %s", d)
+		}
+		n, err := strconv.ParseInt(strings.TrimSpace(d), 10, 64)
+		if err != nil {
+			return 0, err
+		}
+		return n * size, nil
+	}
+	return 0, fmt.Errorf("bad duration type %v", v)
 }

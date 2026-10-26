@@ -26,6 +26,8 @@ import (
 	"maunium.net/go/mautrix/federation/signutil"
 	"maunium.net/go/mautrix/id"
 
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/backoff"
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/fedclient"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pdu"
 )
 
@@ -39,6 +41,8 @@ type Keyring struct {
 	notaries []string
 	server   string
 	now      func() time.Time
+	// Backoff is the destination retry limiter; nil for none.
+	Backoff *backoff.Limiter
 
 	mu  sync.Mutex
 	mem map[string]map[string]pdu.VerifyKey
@@ -52,8 +56,9 @@ type Keyring struct {
 // New builds a keyring for serverName, asking notaries (trusted_key_servers,
 // in order) before the servers themselves.
 func New(serverName string, db DBKeys, notaries []string) *Keyring {
+	// Each attempt is timed by fedclient.Attempt; this only bounds one.
 	settings := exhttp.SensibleClientSettings
-	settings.GlobalTimeout = 30 * time.Second
+	settings.GlobalTimeout = 2 * time.Minute
 	fed := federation.NewClient(serverName, nil, federation.NewInMemoryCache(), settings)
 	return &Keyring{db: db, fed: fed, notaries: notaries, server: serverName, now: time.Now,
 		mem: map[string]map[string]pdu.VerifyKey{}}
@@ -130,10 +135,16 @@ func (k *Keyring) fromNotaries(ctx context.Context, server string, keyIDs []stri
 			var resp struct {
 				ServerKeys []json.RawMessage `json:"server_keys"`
 			}
-			_, _, err := k.fed.MakeFullRequest(ctx, federation.RequestParams{
-				ServerName: notary, Method: http.MethodPost,
-				Path:        federation.KeyURLPath{"v2", "query"},
-				RequestJSON: req, ResponseJSON: &resp,
+			// post_json without a timeout: retried, and backoff honoured.
+			err := k.Backoff.Do(ctx, notary, backoff.Options{}, func() (*http.Response, error) {
+				return fedclient.Retrying(ctx, func(ctx context.Context) (*http.Response, error) {
+					_, r, err := k.fed.MakeFullRequest(ctx, federation.RequestParams{
+						ServerName: notary, Method: http.MethodPost,
+						Path:        federation.KeyURLPath{"v2", "query"},
+						RequestJSON: req, ResponseJSON: &resp,
+					})
+					return r, err
+				})
 			})
 			if err != nil {
 				return
@@ -158,12 +169,18 @@ func (k *Keyring) fromNotaries(ctx context.Context, server string, keyIDs []stri
 	return out
 }
 
-// direct is ServerKeyFetcher: GET /_matrix/key/v2/server, 10s.
+// direct is ServerKeyFetcher: GET /_matrix/key/v2/server with
+// ignore_backoff and a 10s timeout, so one attempt.
 func (k *Keyring) direct(ctx context.Context, server string) map[string]pdu.VerifyKey {
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	body, _, err := k.fed.MakeFullRequest(ctx, federation.RequestParams{
-		ServerName: server, Method: http.MethodGet, Path: federation.KeyURLPath{"v2", "server"},
+	var body []byte
+	err := k.Backoff.Do(ctx, server, backoff.Options{IgnoreBackoff: true}, func() (*http.Response, error) {
+		return fedclient.Attempt(ctx, 10*time.Second, func(ctx context.Context) (*http.Response, error) {
+			b, r, err := k.fed.MakeFullRequest(ctx, federation.RequestParams{
+				ServerName: server, Method: http.MethodGet, Path: federation.KeyURLPath{"v2", "server"},
+			})
+			body = b
+			return r, err
+		})
 	})
 	if err != nil {
 		return nil

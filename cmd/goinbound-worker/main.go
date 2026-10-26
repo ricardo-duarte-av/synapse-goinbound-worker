@@ -29,6 +29,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/acl"
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/backoff"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/config"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/dbrole"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/edu"
@@ -290,6 +291,7 @@ func buildHandler(ctx context.Context, cfg *config.Config, up *proxy.Proxy, log 
 		opts.PDUs = pduSink{live}
 	}
 	var proc *inbound.Processor
+	var limiter *backoff.Limiter
 	var handler atomic.Pointer[txn.Handler]
 	var wdb *inbound.DB
 	if cfg.Modes.PDU.ServesNatively() {
@@ -303,8 +305,26 @@ func buildHandler(ctx context.Context, cfg *config.Config, up *proxy.Proxy, log 
 			proc.WithoutFallback()
 			log.Warn().Msg("write.fallback is none: an event write mode cannot handle is retried, then dropped, as Synapse drops one it fails to handle")
 		}
+		// Every request write mode makes to another server is under
+		// Synapse's destination retry limiter; its timings are stored once
+		// the replication bus is up (write.mark_origins_up).
+		limiter = backoff.New(pst, nil, hs.Backoff)
 		// Keys Synapse does not hold yet, found as its Keyring would.
 		keys := keyring.New(hs.ServerName, pst.VerifyKeys, notaries)
+		keys.Backoff = limiter
+		// Write mode's own policy client: the shadow's asks change no
+		// timings.
+		writeAsker := asker
+		if line, err := hs.SigningKeyLine(); err == nil && asker != nil {
+			var allow func(string) bool
+			if hs.DomainWhitelist != nil {
+				allow = func(s string) bool { return hs.DomainWhitelist[s] }
+			}
+			if pc, err := policysign.New(hs.ServerName, line, allow); err == nil {
+				pc.Backoff = limiter
+				writeAsker = pc
+			}
+		}
 		if cfg.Write.FetchesMissingEvents() {
 			line, err := hs.SigningKeyLine()
 			if err != nil {
@@ -315,15 +335,17 @@ func buildHandler(ctx context.Context, cfg *config.Config, up *proxy.Proxy, log 
 			if hs.DomainWhitelist != nil {
 				allow = func(s string) bool { return hs.DomainWhitelist[s] }
 			}
-			// An outer bound only (3 minutes for the response, 6 in all):
-			// fedfetch times each attempt as Synapse does, up to 60s for
-			// the response and 60s more for its body.
-			fc, err := fedclient.New(hs.ServerName, line, allow, 3*time.Minute)
+			// An outer bound only (10 minutes for the response, 20 in
+			// all): fedfetch times each attempt as Synapse does, up to
+			// /state's 10 minutes for the response and as long again for
+			// its body.
+			fc, err := fedclient.New(hs.ServerName, line, allow, 10*time.Minute)
 			if err != nil {
 				db.Close()
 				return nil, noop, err
 			}
-			fetcher := fedfetch.New(fc, pst, pv, asker, hs.ServerName, keys)
+			fetcher := fedfetch.New(fc, pst, pv, writeAsker, hs.ServerName, keys)
+			fetcher.Backoff = limiter
 			fetcher.OnFailure = func(ctx context.Context, roomID, eventID, cause string) {
 				if err := wdb.RecordFailedPull(ctx, roomID, eventID, cause); err != nil {
 					log.Warn().Err(err).Str("event_id", eventID).Msg("Could not record a failed pull attempt")
@@ -333,7 +355,7 @@ func buildHandler(ctx context.Context, cfg *config.Config, up *proxy.Proxy, log 
 			log.Info().Msg("Write mode fetches missing prev events from the origin")
 		}
 		deps := inbound.FrontDoorDeps{
-			Store: pst, Verifier: pv, ACL: acls, Policy: asker, Processor: proc, Server: hs.ServerName, Keys: keys,
+			Store: pst, Verifier: pv, ACL: acls, Policy: writeAsker, Processor: proc, Server: hs.ServerName, Keys: keys,
 		}
 		if d := cfg.Write.TestDropPDUs; d != nil {
 			deps.TestDrop = inbound.NewTestDrop(d.Origin, d.Room, d.Count, log)
@@ -368,6 +390,9 @@ func buildHandler(ctx context.Context, cfg *config.Config, up *proxy.Proxy, log 
 		busCtx, stopBus = context.WithCancel(context.Background())
 		go bus.Listen(busCtx, r.OnReplicate)
 		opts.OriginUp = r
+		if limiter != nil {
+			limiter.SetWriter(r)
+		}
 	} else {
 		log.Info().Msg("write.mark_origins_up is off: transactions from origins in backoff go to Synapse's worker")
 	}

@@ -81,7 +81,7 @@ Everything else goes through Synapse's replication endpoints:
 | 14 | Signing keys Synapse does not hold yet | **done** (`internal/keyring`: Synapse's order, notaries merged, then the origin); kept in memory, not stored, since storing means invalidating Synapse's caches over replication |
 | 15 | Push on invites of local users: MSC4380 and MSC4155 invite config | **done** (`inviteAllowed`); checked live by the push check |
 | 12 | Verification in reverse: after Go writes, re-derive and compare | todo |
-| 13 | A/B replay on two copies of a snapshot | todo |
+| 13 | A/B replay on two copies of a snapshot | **dropped**: a second Synapse needs our server name and signing key, and anything it sent out would look like a second homeserver to the network (operator, 2026-10-26) |
 
 ## Testing the fetch path
 
@@ -135,15 +135,27 @@ event must end up persisted exactly once, with nothing left staged.
   again. Still missing: "ERROR 403: Auth events could not be found", the
   received event dropped, or the pulled one recorded as a failed pull.
 - Remote fetches retry as Synapse's federation client does: `/state_ids`,
-  `/state` and `/event` for missing state, which Synapse requests without a
-  timeout, get 60s an attempt and up to 3 retries on no response, a 5xx or a
-  429 (`fedfetch.retrying`). `/get_missing_events` (60s) and the fetch from
-  the sender (10s) are tried once. Every attempt gets its timeout until the
-  response arrives and the same again for the body, as `_send_request` and
-  `_handle_response` time them (`fedfetch.attempt`). Not ported: `get_pdu`'s per-process
-  cooldown, which skips a destination it asked for the same event less than a
-  minute before (`PDU_RETRY_TIME_MS`), and the destination backoff
-  (`NotRetryingDestination`).
+  `/event` for missing state, `/event_auth` and the notary key query,
+  which Synapse requests without a timeout, get 60s an attempt and up to 3
+  retries on no response, a 5xx or a 429 (`fedclient.Retrying`).
+  `/get_missing_events` (60s), `/state` (10 minutes), the fetch from the
+  sender (10s), a server's own keys (10s) and policy asks (30s) are tried
+  once. Every attempt gets its timeout until the response arrives and the
+  same again for the body, as `_send_request` and `_handle_response` time
+  them (`fedclient.Attempt`).
+- Every request write mode makes is under Synapse's destination retry
+  limiter (`internal/backoff`, `retryutils.py`): a destination in backoff is
+  not contacted (`NotRetryingDestination`), except for key fetches and
+  policy asks (`ignore_backoff`); a failure (no response, 5xx, 401, 429)
+  starts or lengthens its backoff (`federation.destination_*`, defaults 10m,
+  ×2, 7d), and a success clears it, announcing REMOTE_SERVER_UP when it was
+  failing. The timings are stored as Synapse stores them, with their
+  `caches` row and RDATA (`write.mark_origins_up` must be on; without it
+  backoff is honoured but not stored). The shadow's own policy asks are not
+  limited, so they change nothing.
+- `get_pdu`'s per-process state is ported: a destination is asked for an
+  event at most once a minute (`PDU_RETRY_TIME_MS`), and a fetched event is
+  reused for two minutes (`_get_pdu_cache`).
 - Origins in backoff: served with `write.mark_origins_up` (the reset, its
   `caches` stream row and RDATA, then `REMOTE_SERVER_UP`). Only `/send`
   reaches this worker (`not_send` is 0); other federation endpoints go to
@@ -162,8 +174,8 @@ Python worker throughout: both stage into the same table and take the same
 lock, so a room is only ever processed by one process at a time, and
 whichever holds the lock processes everything staged in it.
 
-Gates, in order: local tests against a Synapse schema; the A/B replay; a
-canary of a few origins with the reverse verification; native.
+Gates, in order: local tests against a Synapse schema; a canary of a few
+origins with the reverse verification; native.
 
 ### Retiring the Python worker
 

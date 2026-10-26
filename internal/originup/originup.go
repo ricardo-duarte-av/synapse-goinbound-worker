@@ -39,9 +39,9 @@ var resets = promauto.NewCounterVec(prometheus.CounterOpts{
 	Help: "Origins in backoff marked as up, by outcome: reset, db_error, publish_error.",
 }, []string{"outcome"})
 
-// Store writes the reset (inbound.DB).
+// Store writes retry timings (inbound.DB).
 type Store interface {
-	ResetDestination(ctx context.Context, origin string) (inbound.CacheInvalidation, error)
+	SetRetryTimings(ctx context.Context, dest string, failureTS *int64, lastTS, interval int64) (inbound.CacheInvalidation, error)
 }
 
 // Publisher publishes one replication command line on the bus.
@@ -137,6 +137,36 @@ func (r *Resetter) Reset(origin, ip string) {
 }
 
 func (r *Resetter) reset(origin string) (string, error) {
+	return r.storeTimings(origin, nil, 0, 0, true)
+}
+
+var timingWrites = promauto.NewCounterVec(prometheus.CounterOpts{
+	Name: "goinbound_retry_timings_total",
+	Help: "Destination retry timings stored after our own requests (store_retry_timings), by kind (backoff, cleared) and outcome.",
+}, []string{"kind", "outcome"})
+
+// SetTimings is RetryDestinationLimiter's store_retry_timings, run in the
+// background as Synapse runs it: the timings, their caches row and RDATA,
+// and, when up, REMOTE_SERVER_UP (a destination that was failing and no
+// longer is).
+func (r *Resetter) SetTimings(dest string, failureTS *int64, lastTS, interval int64, up bool) {
+	kind := "backoff"
+	if interval == 0 {
+		kind = "cleared"
+	}
+	go func() {
+		outcome, err := r.storeTimings(dest, failureTS, lastTS, interval, up)
+		timingWrites.WithLabelValues(kind, outcome).Inc()
+		if err != nil {
+			r.mu.Lock()
+			r.failedAt = r.now()
+			r.mu.Unlock()
+			r.log.Warn().Err(err).Str("destination", dest).Str("outcome", outcome).Msg("Failed to store destination_retry_timings")
+		}
+	}()
+}
+
+func (r *Resetter) storeTimings(dest string, failureTS *int64, lastTS, interval int64, up bool) (string, error) {
 	r.bus.Lock()
 	defer r.bus.Unlock()
 
@@ -150,7 +180,7 @@ func (r *Resetter) reset(origin string) (string, error) {
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), stepTimeout)
-	inv, err := r.store.ResetDestination(ctx, origin)
+	inv, err := r.store.SetRetryTimings(ctx, dest, failureTS, lastTS, interval)
 	cancel()
 	if err != nil {
 		return "db_error", err
@@ -165,7 +195,10 @@ func (r *Resetter) reset(origin string) (string, error) {
 		return "publish_error", err
 	}
 	r.unannounced = false
-	if err := r.publish("REMOTE_SERVER_UP " + origin); err != nil {
+	if !up {
+		return "stored", nil
+	}
+	if err := r.publish("REMOTE_SERVER_UP " + dest); err != nil {
 		return "publish_error", err
 	}
 	return "reset", nil

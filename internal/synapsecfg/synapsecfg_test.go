@@ -324,3 +324,16 @@ func TestRedis(t *testing.T) {
 		})
 	}
 }
+
+func TestParseDuration(t *testing.T) {
+	for in, want := range map[any]int64{"10m": 600000, "7d": 604800000, "1y": 31536000000, "1500": 1500, 250: 250, "2s": 2000} {
+		if got, err := ParseDuration(in); err != nil || got != want {
+			t.Errorf("%v: %d %v, want %d", in, got, err, want)
+		}
+	}
+	for _, in := range []any{"10x", "", 1.5, true} {
+		if _, err := ParseDuration(in); err == nil {
+			t.Errorf("%v: no error", in)
+		}
+	}
+}

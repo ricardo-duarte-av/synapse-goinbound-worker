@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"net/http"
 	"net/http/httptrace"
 	"time"
@@ -75,4 +76,44 @@ func (t *JSONContentType) RoundTrip(req *http.Request) (*http.Response, error) {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	return t.Next.RoundTrip(req)
+}
+
+// Synapse's federation client for a request made without a timeout
+// (matrixfederationclient.py _send_request): each attempt gets
+// federation.client_timeout (60s), and a send failure, a timeout, a 5xx or a
+// 429 is retried up to max_short_retries (3) times, 0.5s·2ⁿ apart, capped at
+// max_short_retry_delay (2s), times uniform(0.8, 1.4). homeserver.yaml sets
+// none of the three. A request made with a timeout is tried once.
+var (
+	attemptTimeout = 60 * time.Second
+	shortRetries   = 3
+	shortDelay     = 500 * time.Millisecond
+	maxShortDelay  = 2 * time.Second
+)
+
+// Retrying runs send as _send_request's retry loop does, returning the
+// last attempt's response and error.
+func Retrying(ctx context.Context, send func(context.Context) (*http.Response, error)) (*http.Response, error) {
+	for left := shortRetries; ; left-- {
+		resp, err := Attempt(ctx, attemptTimeout, send)
+		if err == nil || left == 0 || ctx.Err() != nil || !retryable(resp) {
+			return resp, err
+		}
+		d := min(shortDelay<<(shortRetries-left), maxShortDelay)
+		d = time.Duration(float64(d) * (0.8 + 0.6*rand.Float64()))
+		t := time.NewTimer(d)
+		select {
+		case <-t.C:
+		case <-ctx.Done():
+			t.Stop()
+			return resp, err
+		}
+	}
+}
+
+// retryable is RequestSendFailed(can_retry=True): no response at all (a
+// connection error, a DNS failure, the attempt timing out), or a 5xx or 429.
+// Other statuses, and a body that fails to read after the headers, are not.
+func retryable(resp *http.Response) bool {
+	return resp == nil || resp.StatusCode >= 500 && resp.StatusCode < 600 || resp.StatusCode == http.StatusTooManyRequests
 }

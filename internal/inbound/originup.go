@@ -11,11 +11,10 @@ import (
 // (get_destination_retry_timings, keyed by destination).
 const CacheRetryTimings = "get_destination_retry_timings"
 
-// qResetDestination is _set_destination_retry_timings_txn with
-// (origin, None, 0, 0).
-const qResetDestination = `
+// qSetRetryTimings is _set_destination_retry_timings_txn.
+const qSetRetryTimings = `
 	INSERT INTO destinations (destination, failure_ts, retry_last_ts, retry_interval)
-	VALUES ($1, NULL, 0, 0)
+	VALUES ($1, $2, $3, $4)
 	ON CONFLICT (destination) DO UPDATE SET
 		failure_ts = EXCLUDED.failure_ts,
 		retry_last_ts = EXCLUDED.retry_last_ts,
@@ -46,14 +45,19 @@ type CacheInvalidation struct {
 	InvalidationTS int64
 }
 
-// ResetDestination is set_destination_retry_timings(origin, None, 0, 0):
-// the reset, and the invalidation of every process's cached timings,
-// streamed under our instance name. The caller publishes the returned row.
+// ResetDestination is set_destination_retry_timings(origin, None, 0, 0).
 func (d *DB) ResetDestination(ctx context.Context, origin string) (CacheInvalidation, error) {
+	return d.SetRetryTimings(ctx, origin, nil, 0, 0)
+}
+
+// SetRetryTimings is set_destination_retry_timings: the upsert, and the
+// invalidation of every process's cached timings, streamed under our
+// instance name. The caller publishes the returned row.
+func (d *DB) SetRetryTimings(ctx context.Context, dest string, failureTS *int64, lastTS, interval int64) (CacheInvalidation, error) {
 	inv := CacheInvalidation{Instance: d.instance, CacheFunc: CacheRetryTimings,
-		Keys: []string{origin}, InvalidationTS: d.nowMS()}
+		Keys: []string{dest}, InvalidationTS: d.nowMS()}
 	err := pgx.BeginFunc(ctx, d.pool, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, qResetDestination, origin); err != nil {
+		if _, err := tx.Exec(ctx, qSetRetryTimings, dest, failureTS, lastTS, interval); err != nil {
 			return err
 		}
 		if err := tx.QueryRow(ctx, qNextCacheID).Scan(&inv.StreamID); err != nil {
@@ -63,7 +67,7 @@ func (d *DB) ResetDestination(ctx context.Context, origin string) (CacheInvalida
 		return err
 	})
 	if err != nil {
-		return CacheInvalidation{}, fmt.Errorf("inbound: resetting %s: %w", origin, err)
+		return CacheInvalidation{}, fmt.Errorf("inbound: retry timings of %s: %w", dest, err)
 	}
 	return inv, nil
 }

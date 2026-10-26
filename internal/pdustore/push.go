@@ -293,3 +293,22 @@ func (s *Store) Receipts(ctx context.Context, roomID string, users []string) (ma
 	}
 	return out, rows.Err()
 }
+
+const qRetryTimings = `SELECT failure_ts, retry_last_ts, retry_interval FROM destinations WHERE destination = $1`
+
+// RetryTimings is get_destination_retry_timings: none (all zero) without a
+// row or with retry_last_ts null or zero.
+func (s *Store) RetryTimings(ctx context.Context, dest string) (failureTS *int64, lastTS, interval int64, err error) {
+	var last, iv *int64
+	err = s.pool.QueryRow(ctx, qRetryTimings, dest).Scan(&failureTS, &last, &iv)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, 0, 0, nil
+	}
+	if err != nil || last == nil || *last == 0 {
+		return nil, 0, 0, err
+	}
+	if iv != nil {
+		interval = *iv
+	}
+	return failureTS, *last, interval, nil
+}

@@ -14,14 +14,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"maunium.net/go/mautrix/federation"
 
+	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/backoff"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/fedclient"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/keyring"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pdu"
@@ -54,7 +55,31 @@ type Client struct {
 	// OnFailure records a failed pull attempt (record_failure_callback):
 	// a pulled event whose signature or content hash failed.
 	OnFailure func(ctx context.Context, roomID, eventID, cause string)
+	// Backoff is the destination retry limiter around every request; nil
+	// for none.
+	Backoff *backoff.Limiter
+
+	// get_pdu's per-process state: when each destination was last asked
+	// for each event (pdu_destination_tried), and the events it returned
+	// (_get_pdu_cache).
+	pduMu    sync.Mutex
+	pduTried map[string]map[string]time.Time
+	pduCache map[string]cachedPDU
 }
+
+type cachedPDU struct {
+	p  *Pulled
+	at time.Time
+}
+
+// get_pdu's limits: a destination is asked for an event at most once a
+// minute (PDU_RETRY_TIME_MS), and a fetched event is reused for two
+// minutes, at most 1000 of them.
+const (
+	pduRetryTime   = time.Minute
+	pduCacheExpiry = 2 * time.Minute
+	pduCacheMax    = 1000
+)
 
 // How check treats a bad signature: in a batch, look for a good copy
 // (_check_sigs_and_hash_and_fetch_one); for one event, fail (get_pdu).
@@ -78,11 +103,13 @@ func (c *Client) do(ctx context.Context, timeout time.Duration, server, method s
 	send := func(ctx context.Context) (*http.Response, error) {
 		return c.send(ctx, server, method, path, query, body, out)
 	}
-	if timeout == 0 {
-		return retrying(ctx, send)
-	}
-	_, err := attempt(ctx, timeout, send)
-	return err
+	// The limiter is around the whole retry loop, as in _send_request.
+	return c.Backoff.Do(ctx, server, backoff.Options{}, func() (*http.Response, error) {
+		if timeout == 0 {
+			return retrying(ctx, send)
+		}
+		return attempt(ctx, timeout, send)
+	})
 }
 
 func (c *Client) send(ctx context.Context, server, method string, path []any, query url.Values, body, out any) (*http.Response, error) {
@@ -98,48 +125,13 @@ func (c *Client) send(ctx context.Context, server, method string, path []any, qu
 	return resp, err
 }
 
-// Synapse's federation client for a request made without a timeout
-// (matrixfederationclient.py _send_request): each attempt gets
-// federation.client_timeout (60s), and a send failure, a timeout, a 5xx or a
-// 429 is retried up to max_short_retries (3) times, 0.5s·2ⁿ apart, capped at
-// max_short_retry_delay (2s), times uniform(0.8, 1.4). homeserver.yaml sets
-// none of the three. A request made with a timeout is tried once.
-var (
-	attemptTimeout = 60 * time.Second
-	shortRetries   = 3
-	shortDelay     = 500 * time.Millisecond
-	maxShortDelay  = 2 * time.Second
-)
-
-// retrying runs send as _send_request's retry loop does.
-func retrying(ctx context.Context, send func(context.Context) (*http.Response, error)) error {
-	for left := shortRetries; ; left-- {
-		resp, err := attempt(ctx, attemptTimeout, send)
-		if err == nil || left == 0 || ctx.Err() != nil || !retryable(resp) {
-			return err
-		}
-		d := min(shortDelay<<(shortRetries-left), maxShortDelay)
-		d = time.Duration(float64(d) * (0.8 + 0.6*rand.Float64()))
-		t := time.NewTimer(d)
-		select {
-		case <-t.C:
-		case <-ctx.Done():
-			t.Stop()
-			return err
-		}
-	}
+// retrying is fedclient.Retrying; attempt is fedclient.Attempt.
+func retrying(ctx context.Context, send func(context.Context) (*http.Response, error)) (*http.Response, error) {
+	return fedclient.Retrying(ctx, send)
 }
 
-// attempt is fedclient.Attempt.
 func attempt(ctx context.Context, timeout time.Duration, send func(context.Context) (*http.Response, error)) (*http.Response, error) {
 	return fedclient.Attempt(ctx, timeout, send)
-}
-
-// retryable is RequestSendFailed(can_retry=True): no response at all (a
-// connection error, a DNS failure, the attempt timing out), or a 5xx or 429.
-// Other statuses, and a body that fails to read after the headers, are not.
-func retryable(resp *http.Response) bool {
-	return resp == nil || resp.StatusCode >= 500 && resp.StatusCode < 600 || resp.StatusCode == http.StatusTooManyRequests
 }
 
 // MissingEvents is get_missing_events: up to limit events between earliest
@@ -196,8 +188,71 @@ func (c *Client) Event(ctx context.Context, dest, eventID, roomID string, rv *pd
 	return c.event(ctx, 0, dest, eventID, roomID, rv)
 }
 
-// event is get_pdu with its caller's timeout (zero: none).
+// event is get_pdu from one destination with its caller's timeout (zero:
+// none): a cached copy, else nothing if the destination was asked for it
+// less than a minute ago, else the destination's copy, checked. A
+// destination in backoff is skipped without counting as asked.
 func (c *Client) event(ctx context.Context, timeout time.Duration, dest, eventID, roomID string, rv *pdu.RoomVersion) (*Pulled, error) {
+	now := time.Now()
+	c.pduMu.Lock()
+	if e, ok := c.pduCache[eventID]; ok && now.Sub(e.at) < pduCacheExpiry {
+		c.pduMu.Unlock()
+		return e.p, nil
+	}
+	if at, ok := c.pduTried[eventID][dest]; ok && now.Sub(at) < pduRetryTime {
+		c.pduMu.Unlock()
+		return nil, nil
+	}
+	c.pduMu.Unlock()
+	p, err := c.eventFrom(ctx, timeout, dest, eventID, roomID, rv)
+	var nr *backoff.NotRetrying
+	if errors.As(err, &nr) || errors.Is(err, ErrUncertain) || ctx.Err() != nil {
+		return p, err
+	}
+	c.pduMu.Lock()
+	defer c.pduMu.Unlock()
+	if c.pduTried == nil {
+		c.pduTried, c.pduCache = map[string]map[string]time.Time{}, map[string]cachedPDU{}
+	}
+	if c.pduTried[eventID] == nil {
+		c.pduTried[eventID] = map[string]time.Time{}
+	}
+	c.pduTried[eventID][dest] = now
+	if p != nil {
+		c.prunePDUs(now)
+		c.pduCache[eventID] = cachedPDU{p: p, at: now}
+	}
+	return p, err
+}
+
+// prunePDUs drops what has expired, as the minute's _clear_tried_cache and
+// the ExpiringCache do, and makes room for one more cached event.
+func (c *Client) prunePDUs(now time.Time) {
+	for id, dests := range c.pduTried {
+		for d, at := range dests {
+			if now.Sub(at) >= pduRetryTime {
+				delete(dests, d)
+			}
+		}
+		if len(dests) == 0 {
+			delete(c.pduTried, id)
+		}
+	}
+	var oldest string
+	for id, e := range c.pduCache {
+		if now.Sub(e.at) >= pduCacheExpiry {
+			delete(c.pduCache, id)
+		} else if oldest == "" || e.at.Before(c.pduCache[oldest].at) {
+			oldest = id
+		}
+	}
+	if len(c.pduCache) >= pduCacheMax {
+		delete(c.pduCache, oldest)
+	}
+}
+
+// eventFrom is get_pdu_from_destination_raw.
+func (c *Client) eventFrom(ctx context.Context, timeout time.Duration, dest, eventID, roomID string, rv *pdu.RoomVersion) (*Pulled, error) {
 	var resp struct {
 		PDUs []json.RawMessage `json:"pdus"`
 	}
@@ -225,8 +280,8 @@ func (c *Client) State(ctx context.Context, dest, roomID, eventID string, rv *pd
 		PDUs      []json.RawMessage `json:"pdus"`
 	}
 	q := url.Values{"event_id": {eventID}}
-	// get_room_state: no timeout.
-	if err := c.do(ctx, 0, dest, http.MethodGet, []any{"v1", "state", roomID}, q, nil, &resp); err != nil {
+	// get_room_state: ten minutes, tried once (it gives a timeout).
+	if err := c.do(ctx, 10*time.Minute, dest, http.MethodGet, []any{"v1", "state", roomID}, q, nil, &resp); err != nil {
 		return nil, nil, err
 	}
 	for _, list := range []struct {

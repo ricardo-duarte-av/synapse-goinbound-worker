@@ -22,7 +22,7 @@ type fakeStore struct {
 	seen []string
 }
 
-func (s *fakeStore) ResetDestination(_ context.Context, origin string) (inbound.CacheInvalidation, error) {
+func (s *fakeStore) SetRetryTimings(_ context.Context, origin string, _ *int64, _, _ int64) (inbound.CacheInvalidation, error) {
 	if s.gate != nil {
 		<-s.gate
 	}
