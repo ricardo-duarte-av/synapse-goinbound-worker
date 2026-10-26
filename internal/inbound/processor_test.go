@@ -44,6 +44,9 @@ func (f *fakeDecide) Decide(_ context.Context, in pduverify.DecideInput) (*pduve
 	case "raise":
 		d.Raise = "test"
 		d.Entry = pduverify.NewEntry(0, f.base, pdu.StateMap{{Type: "m.room.topic"}: "$t"}, nil)
+	case "raise in resolution":
+		d.Raise = "test"
+		d.Bump = [][]int64{{f.base}}
 	default:
 		d.Entry = pduverify.NewEntry(0, f.base, pdu.StateMap{{Type: "m.room.topic"}: "$t"}, nil)
 		d.Push = []pduverify.PushRow{{UserID: "@u:x", Notif: true}}
@@ -185,6 +188,33 @@ func TestProcessorFailsAnEventWhoseAuthRaises(t *testing.T) {
 	c.QueryRow(ctx, `SELECT count(*) FROM event_push_actions_staging WHERE event_id = '$1'`).Scan(&n)
 	if n != 0 {
 		t.Errorf("%d push rows staged for the failed event", n)
+	}
+}
+
+// State resolution raising leaves only its bumps: no group is stored.
+func TestProcessorFailsAnEventWhoseResolutionRaises(t *testing.T) {
+	ctx := context.Background()
+	d := testDB(t, "goinbound-test")
+	base, _ := d.StoreStateGroup(ctx, "$create", "!r:x", 0, nil, pdu.StateMap{{Type: "m.room.create"}: "$create"}, nil)
+	dec, per := &fakeDecide{base: base}, &fakePersist{}
+	p := NewProcessor(d, dec, per, fakeRead{}, "x", zerolog.Nop())
+	defer p.Close()
+	if err := p.Received(ctx, "y", "!r:x", "$1", v1Event("$1", "raise in resolution", 1), []byte(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "queue empty", func() bool { s, _ := d.NextStaged(ctx, "!r:x"); return s == nil })
+	if p.isDeferred("!r:x") {
+		t.Error("deferred")
+	}
+	per.mu.Lock()
+	if len(per.sent) != 0 {
+		t.Errorf("persisted %d entries", len(per.sent))
+	}
+	per.mu.Unlock()
+	var n int
+	adminConn(t).QueryRow(ctx, `SELECT count(*) FROM state_groups WHERE event_id = '$1'`).Scan(&n)
+	if n != 0 {
+		t.Errorf("%d state groups stored", n)
 	}
 }
 

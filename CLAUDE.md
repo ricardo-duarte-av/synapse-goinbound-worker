@@ -119,8 +119,15 @@ things that are not derivable from the code.
   pulled prev's raise also fails the event that pulled it, recording no
   failed pull; an outlier's raise, behind missing prevs, is caught as
   "We can't get valid state history." and recorded for the pulled event.
+  State resolution raises after bumping the groups and before storing
+  any; soft-fail and push after the groups are stored. Push rules run
+  for soft-failed events too (the visibility filter comes after them).
   Our "missing auth events" is not one of them (`ErrMissingAuth`): Synapse
-  fetches those.
+  fetches those (`/event_auth`). Nor is our parser refusing a stored
+  event, nor a resolution we have not ported: those are plain errors. A
+  `RaiseError` must only ever mean "Synapse raises here"; using it for
+  "not reproduced" (as soft-fail once did, before `f3ff20c`) would now
+  drop events.
 - **v12 `auth_event_ids()` appends the create event**
   (`rust/src/events/formats/v4.rs`). `ParseEvent` does the same. Without it,
   every v12 event fails "no create event in auth events".

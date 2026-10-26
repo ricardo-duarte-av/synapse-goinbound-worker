@@ -441,6 +441,25 @@ func (p *Processor) handle(ctx context.Context, room string, rv *pdu.RoomVersion
 		}
 		d, err = p.decide.Decide(ctx, in)
 	}
+	if err == nil && d.Defer == pduverify.DeferMissingAuth && p.missing != nil {
+		if aerr := p.remoteAuthChain(ctx, s.Origin, rv, d.Event); aerr != nil {
+			log.Info().Err(aerr).Msg("Write mode: leaving an event with missing auth events to Synapse")
+			handled.WithLabelValues("deferred").Inc()
+			return outcomeDefer
+		}
+		if d, err = p.decide.Decide(ctx, in); err == nil && d.Defer == pduverify.DeferMissingAuth {
+			// "Missing auth events": an AuthError, made a FederationError,
+			// after the event's state groups were stored.
+			if _, _, err := p.storeGroups(ctx, room, s.EventID, d); err != nil {
+				log.Warn().Err(err).Msg("Write mode: storing state groups failed; leaving the event to Synapse")
+				handled.WithLabelValues("error").Inc()
+				return outcomeDefer
+			}
+			log.Warn().Str("why", authNotFound).Msg("Error handling PDU")
+			handled.WithLabelValues("dropped").Inc()
+			return outcomeDone
+		}
+	}
 	switch {
 	case err != nil:
 		log.Warn().Err(err).Msg("Write mode: deciding failed; leaving the event to Synapse")
@@ -460,8 +479,8 @@ func (p *Processor) handle(ctx context.Context, room string, rv *pdu.RoomVersion
 		handled.WithLabelValues("dropped").Inc()
 		return outcomeDone
 	case d.Raise != "":
-		// Any other exception: logged, the event not persisted, but its
-		// state groups were stored before auth ran.
+		// Any other exception: logged, the event not persisted, but what
+		// compute_event_context wrote before it raised stays.
 		if _, _, err := p.storeGroups(ctx, room, s.EventID, d); err != nil {
 			log.Warn().Err(err).Msg("Write mode: storing state groups failed; leaving the event to Synapse")
 			handled.WithLabelValues("error").Inc()
@@ -523,7 +542,7 @@ func (p *Processor) write(ctx context.Context, room string, s *Staged, d *pduver
 }
 
 // storeGroups is compute_event_context's writes: the deletion bumps, then
-// the state groups before and after the event.
+// the state groups before and after the event (none without an Entry).
 func (p *Processor) storeGroups(ctx context.Context, room, eventID string, d *pduverify.Decision) (before, after int64, err error) {
 	for _, groups := range d.Bump {
 		missing, err := p.db.BumpDeletion(ctx, groups)
@@ -534,6 +553,10 @@ func (p *Processor) storeGroups(ctx context.Context, room, eventID string, d *pd
 			p.cache.Pop(d.Groups)
 			return 0, 0, fmt.Errorf("%w: %v", ErrMissingGroup, missing)
 		}
+	}
+	if d.Entry == nil {
+		// State resolution raised: the bumps were all it did.
+		return 0, 0, nil
 	}
 	load := func(g int64) (pdu.StateMap, error) { return p.read.StateForGroup(ctx, g) }
 

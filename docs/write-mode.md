@@ -68,7 +68,7 @@ Everything else goes through Synapse's replication endpoints:
 |---|---|---|
 | 1 | Decisions match Synapse: signatures, policy, auth, state, state groups, soft-fail, push, `fed_send_events` body | **done** (shadow, 0 mismatches) |
 | 2 | v2.1 forwards reachability over several link batches | **done** (`c851f57`) |
-| 2b | Decide: write mode's decision for a staged event, through the state cache, checked live against Synapse (`decide` check) | **in shadow**; defers missing prevs, de-outliering, invites' push, v1 state res, partial state, content-hash failures |
+| 2b | Decide: write mode's decision for a staged event, through the state cache, checked live against Synapse (`decide` check) | **in shadow**; defers missing prevs (fetched with `write.missing_events: fetch`), missing auth events (likewise), de-outliering, partial state, content-hash failures |
 | 3 | Write role with exactly the tables above | **done** (`dbrole` writes, `inbound.Grants`); created or repaired at startup |
 | 4 | Staging, room lock, purge read lock, interoperable with Python | **done** (`internal/inbound`: Synapse's SQL, tested on a throwaway PostgreSQL) |
 | 5 | Room queue processor and the one-minute sweep | **done** (`inbound.Processor`); a deferred event stays staged, with its room, for Synapse's sweep |
@@ -125,8 +125,15 @@ event must end up persisted exactly once, with nothing left staged.
   `failed`) after its state groups are stored; a pulled prev that raises
   fails the received event too; an outlier that raises behind missing prevs
   records "ERROR 403: We can't get valid state history." for the pulled
-  event. Raises elsewhere (state resolution, soft-fail, push) are still
-  deferred.
+  event. Raises in state resolution (after bumping the groups, before
+  storing any), soft-fail and push (after the groups are stored; push
+  rules are evaluated for soft-failed events too, as Synapse evaluates
+  them before its visibility filter) are handled the same way.
+- Auth events we do not hold are fetched as Synapse fetches them: the
+  event's state groups stored, `/event_auth` from the origin (any failure
+  logged and swallowed), the chain persisted as outliers, then decided
+  again. Still missing: "ERROR 403: Auth events could not be found", the
+  received event dropped, or the pulled one recorded as a failed pull.
 - Remote fetches retry as Synapse's federation client does: `/state_ids`,
   `/state` and `/event` for missing state, which Synapse requests without a
   timeout, get 60s an attempt and up to 3 retries on no response, a 5xx or a

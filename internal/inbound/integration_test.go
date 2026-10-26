@@ -160,6 +160,27 @@ func TestWriteModeFetchesMissingPrevs(t *testing.T) {
 		defer func() { raiseAt = "" }()
 		runMissingPrevs(t, true, true)
 	})
+	// Carol's join is in the room's state but not held: a PDU she sends
+	// refers to an unknown auth event, fetched with /event_auth.
+	t.Run("auth event fetched", func(t *testing.T) {
+		authGap = "served"
+		defer func() { authGap = "" }()
+		runMissingPrevs(t, true, false)
+	})
+	// The origin has no /event_auth: "Auth events could not be found",
+	// and the PDU is dropped.
+	t.Run("auth event not found", func(t *testing.T) {
+		authGap = "unserved"
+		defer func() { authGap = "" }()
+		runMissingPrevs(t, true, false)
+	})
+	// The pulled prev is hers: the failure is recorded for it, and M3 is
+	// dropped, its prev still missing.
+	t.Run("pulled prev's auth event not found", func(t *testing.T) {
+		authGap = "pulled"
+		defer func() { authGap = "" }()
+		runMissingPrevs(t, true, false)
+	})
 	// Through the front door, beside a PDU with a forged signature.
 	t.Run("front door", func(t *testing.T) {
 		frontDoor = true
@@ -169,6 +190,11 @@ func TestWriteModeFetchesMissingPrevs(t *testing.T) {
 }
 
 var frontDoor bool
+
+// authGap gives Carol, whose join we do not hold, a PDU: the one received
+// ("served": the origin has /event_auth, "unserved": it does not) or the
+// pulled prev ("pulled").
+var authGap string
 
 // raiseAt makes the pulled prev ("pulled") or the outlier behind it
 // ("outlier") a power levels event whose auth raises.
@@ -184,7 +210,7 @@ func runMissingPrevs(t *testing.T, originHasIt, gap bool) {
 	_, rpriv, _ := ed25519.GenerateKey(nil)
 	local := signer{"local.test", "ed25519:l", lpriv}
 	remote := signer{"remote.test", "ed25519:r", rpriv}
-	alice, bob := "@alice:local.test", "@bob:remote.test"
+	alice, bob, carol := "@alice:local.test", "@bob:remote.test", "@carol:remote.test"
 	ts := int64(1_700_000_000_000)
 
 	ev := func(s signer, typ, sender string, sk *string, content map[string]any, depth int, prevs, auth []string) (string, []byte) {
@@ -196,12 +222,13 @@ func runMissingPrevs(t *testing.T, originHasIt, gap bool) {
 		}
 		return s.event(t, rv, f)
 	}
-	empty, aliceKey, bobKey := "", alice, bob
+	empty, aliceKey, bobKey, carolKey := "", alice, bob, carol
 	createID, create := ev(local, "m.room.create", alice, &empty, map[string]any{"creator": alice, "room_version": "10"}, 1, []string{}, []string{})
 	aJoinID, aJoin := ev(local, "m.room.member", alice, &aliceKey, map[string]any{"membership": "join"}, 2, []string{createID}, []string{createID})
 	plID, pl := ev(local, "m.room.power_levels", alice, &empty, map[string]any{"users": map[string]any{alice: 100, bob: 100}}, 3, []string{aJoinID}, []string{createID, aJoinID})
 	jrID, jr := ev(local, "m.room.join_rules", alice, &empty, map[string]any{"join_rule": "public"}, 4, []string{plID}, []string{createID, aJoinID, plID})
 	bJoinID, bJoin := ev(remote, "m.room.member", bob, &bobKey, map[string]any{"membership": "join"}, 5, []string{jrID}, []string{createID, plID, jrID})
+	cJoinID, cJoin := ev(remote, "m.room.member", carol, &carolKey, map[string]any{"membership": "join"}, 5, []string{jrID}, []string{createID, plID, jrID})
 	m1ID, m1 := ev(remote, "m.room.message", bob, nil, map[string]any{"msgtype": "m.text", "body": "one"}, 6, []string{bJoinID}, []string{createID, plID, bJoinID})
 	// With a gap, M2's prev is X, which nobody sends us but /event.
 	m2Prev := m1ID
@@ -218,7 +245,12 @@ func runMissingPrevs(t *testing.T, originHasIt, gap bool) {
 	if raiseAt == "pulled" {
 		m2Type, m2Key, m2Content = "m.room.power_levels", &empty, badPL
 	}
-	m2ID, m2 := ev(remote, m2Type, bob, m2Key, m2Content, 8, []string{m2Prev}, []string{createID, plID, bJoinID})
+	m2Sender, m2Auth := bob, []string{createID, plID, bJoinID}
+	if authGap == "pulled" {
+		m2Sender, m2Auth = carol, []string{createID, plID, cJoinID}
+	}
+	m2ID, m2 := ev(remote, m2Type, m2Sender, m2Key, m2Content, 8, []string{m2Prev}, m2Auth)
+	mcID, mc := ev(remote, "m.room.message", carol, nil, map[string]any{"msgtype": "m.text", "body": "carol"}, 7, []string{m1ID}, []string{createID, plID, cJoinID})
 	m3ID, m3 := ev(remote, "m.room.message", bob, nil, map[string]any{"msgtype": "m.text", "body": "three"}, 9, []string{m2ID}, []string{createID, plID, bJoinID})
 
 	// The room as Synapse holds it once M1 is persisted.
@@ -232,10 +264,14 @@ func runMissingPrevs(t *testing.T, originHasIt, gap bool) {
 	must(`TRUNCATE events, event_json, event_to_state_groups, current_state_events, event_forward_extremities,
 		room_depth, local_current_membership, rooms CASCADE`)
 	must(`INSERT INTO rooms (room_id, is_public, creator, room_version, has_auth_chain_index) VALUES ($1, false, $2, '10', false)`, room, alice)
-	group, err := d.StoreStateGroup(ctx, bJoinID, room, 0, nil, pdu.StateMap{
+	roomState := pdu.StateMap{
 		{Type: "m.room.create"}: createID, {Type: "m.room.member", StateKey: alice}: aJoinID,
 		{Type: "m.room.power_levels"}: plID, {Type: "m.room.join_rules"}: jrID, {Type: "m.room.member", StateKey: bob}: bJoinID,
-	}, nil)
+	}
+	if authGap != "" {
+		roomState[pdu.StateKey{Type: "m.room.member", StateKey: carol}] = cJoinID
+	}
+	group, err := d.StoreStateGroup(ctx, bJoinID, room, 0, nil, roomState, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,6 +325,9 @@ func runMissingPrevs(t *testing.T, originHasIt, gap bool) {
 		case strings.HasPrefix(r.URL.Path, "/_matrix/federation/v1/state/") && r.URL.Query().Get("event_id") == xID:
 			w.Write([]byte(`{"auth_chain":[` + string(create) + `,` + string(aJoin) + `,` + string(pl) + `],"pdus":[` +
 				string(create) + `,` + string(aJoin) + `,` + string(pl) + `,` + string(jr) + `,` + string(bJoin) + `]}`))
+			return
+		case strings.HasPrefix(r.URL.Path, "/_matrix/federation/v1/event_auth/") && authGap == "served":
+			w.Write([]byte(`{"auth_chain":[` + string(create) + `,` + string(aJoin) + `,` + string(pl) + `,` + string(jr) + `,` + string(cJoin) + `]}`))
 			return
 		case r.URL.Path == "/_matrix/federation/v1/event/"+xID:
 			w.Write([]byte(`{"origin":"remote.test","origin_server_ts":1,"pdus":[` + string(x) + `]}`))
@@ -344,13 +383,63 @@ func runMissingPrevs(t *testing.T, originHasIt, gap bool) {
 			t.Error("the forged PDU was staged")
 		}
 	} else {
-		staged, err := pduverify.StagedEvent(m3, time.Now(), "", nil)
+		recvID, recv := m3ID, m3
+		if authGap == "served" || authGap == "unserved" {
+			recvID, recv = mcID, mc
+		}
+		staged, err := pduverify.StagedEvent(recv, time.Now(), "", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := p.Received(ctx, "remote.test", room, m3ID, staged, []byte(`{}`)); err != nil {
+		if err := p.Received(ctx, "remote.test", room, recvID, staged, []byte(`{}`)); err != nil {
 			t.Fatal(err)
 		}
+	}
+	failedPulls := func() []string {
+		var causes []string
+		rows, err := c.Query(ctx, `SELECT event_id || ' ' || last_cause FROM event_failed_pull_attempts WHERE room_id = $1`, room)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var r string
+			rows.Scan(&r)
+			causes = append(causes, r)
+		}
+		return causes
+	}
+	if authGap != "" {
+		waitFor(t, "unstaged", func() bool { s, _ := d.NextStaged(ctx, room); return s == nil })
+		per.mu.Lock()
+		defer per.mu.Unlock()
+		if p.isDeferred(room) {
+			t.Error("deferred")
+		}
+		switch authGap {
+		case "served":
+			if len(per.order) != 2 || per.order[0] != cJoinID || per.order[1] != mcID {
+				t.Fatalf("persisted %v, want Carol's join then her message", per.order)
+			}
+			if !gjson.GetBytes(per.sent[0], "outlier").Bool() {
+				t.Errorf("Carol's join not an outlier: %s", per.sent[0])
+			}
+			if r := gjson.GetBytes(per.sent[1], "rejected_reason"); r.Type != gjson.Null {
+				t.Errorf("message rejected: %s", r.Raw)
+			}
+		case "unserved":
+			if len(per.sent) != 0 {
+				t.Errorf("persisted %v", per.order)
+			}
+		case "pulled":
+			if len(per.sent) != 0 {
+				t.Errorf("persisted %v", per.order)
+			}
+			if want := m2ID + " " + authNotFound; len(failedPulls()) != 1 || failedPulls()[0] != want {
+				t.Errorf("failed pulls %v, want [%s]", failedPulls(), want)
+			}
+		}
+		return
 	}
 	if raiseAt != "" {
 		waitFor(t, "M3 unstaged", func() bool { s, _ := d.NextStaged(ctx, room); return s == nil })
@@ -362,17 +451,7 @@ func runMissingPrevs(t *testing.T, originHasIt, gap bool) {
 		if p.isDeferred(room) {
 			t.Error("deferred")
 		}
-		var causes []string
-		rows, err := c.Query(ctx, `SELECT event_id || ' ' || last_cause FROM event_failed_pull_attempts WHERE room_id = $1`, room)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for rows.Next() {
-			var r string
-			rows.Scan(&r)
-			causes = append(causes, r)
-		}
-		rows.Close()
+		causes := failedPulls()
 		var groups int
 		c.QueryRow(ctx, `SELECT count(*) FROM state_groups WHERE event_id = $1`, m2ID).Scan(&groups)
 		switch raiseAt {

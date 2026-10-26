@@ -37,6 +37,7 @@ type Fetching interface {
 	StateIDs(ctx context.Context, dest, roomID, eventID string) (state, auth []string, err error)
 	Event(ctx context.Context, dest, eventID, roomID string, rv *pdu.RoomVersion) (*fedfetch.Pulled, error)
 	State(ctx context.Context, dest, roomID, eventID string, rv *pdu.RoomVersion) (auth, state []*fedfetch.Pulled, err error)
+	EventAuth(ctx context.Context, dest, roomID, eventID string, rv *pdu.RoomVersion) ([]*fedfetch.Pulled, error)
 }
 
 // MissingDeps enables the missing events path. Without it, an event with
@@ -252,13 +253,28 @@ func (p *Processor) processPulledEvent(ctx context.Context, origin string, rv *p
 	if err != nil {
 		return err
 	}
-	d, err := m.Verifier.Decide(ctx, pduverify.DecideInput{
+	in := pduverify.DecideInput{
 		Origin: origin, EventJSON: pe.Raw, Metadata: meta, EventID: pe.ID,
 		Room: rv, OurServer: p.server, Cache: p.cache, StateBefore: stateBefore,
-	})
+	}
+	d, err := m.Verifier.Decide(ctx, in)
+	if err == nil && d.Defer == pduverify.DeferMissingAuth {
+		if err := p.remoteAuthChain(ctx, origin, rv, ev); err != nil {
+			return err
+		}
+		d, err = m.Verifier.Decide(ctx, in)
+	}
 	switch {
 	case err != nil:
 		return err
+	case d.Defer == pduverify.DeferMissingAuth:
+		// _process_received_pdu's AuthError, as a FederationError:
+		// recorded, and the event not persisted. Its groups were stored.
+		if _, _, err := p.storeGroups(ctx, room, pe.ID, d); err != nil {
+			return fmt.Errorf("%w: storing state groups for pulled %s: %v", errUncertain, pe.ID, err)
+		}
+		log.Warn().Msg("Pulled event failed history check")
+		return p.db.RecordFailedPull(ctx, room, pe.ID, authNotFound)
 	case d.Defer != "":
 		return fmt.Errorf("%w: pulled %s: %s", errUncertain, pe.ID, d.Defer)
 	case d.Raise != "":
@@ -281,6 +297,44 @@ func (p *Processor) processPulledEvent(ctx context.Context, origin string, rv *p
 		p.resync(d.ResyncDevices)
 	}
 	return nil
+}
+
+// authNotFound is the FederationError _process_received_pdu makes of
+// _load_or_fetch_auth_events_for_event's AuthError, as str() gives it.
+const authNotFound = "ERROR 403: Auth events could not be found"
+
+// remoteAuthChain is the fetch in _load_or_fetch_auth_events_for_event:
+// _get_remote_auth_chain_for_event, whose every exception is logged and
+// swallowed ("Failed to get auth chain"). Errors of ours, not Synapse's,
+// are errUncertain.
+func (p *Processor) remoteAuthChain(ctx context.Context, dest string, rv *pdu.RoomVersion, ev *pdu.Event) error {
+	p.log.Info().Str("event_id", ev.ID).Msg("Event refers to unknown auth events: fetching auth chain")
+	events, err := p.missing.Fetch.EventAuth(ctx, dest, ev.RoomID, ev.ID, rv)
+	if errors.Is(err, fedfetch.ErrUncertain) {
+		return fmt.Errorf("%w: %v", errUncertain, err)
+	}
+	if err != nil {
+		p.log.Warn().Err(err).Str("event_id", ev.ID).Msg("Failed to get auth chain")
+		return nil
+	}
+	p.log.Info().Int("count", len(events)).Msg("/event_auth returned events")
+	// The event itself may be returned, but is not processed yet.
+	var auth []*fedfetch.Pulled
+	for _, e := range events {
+		if e.ID != ev.ID {
+			auth = append(auth, e)
+		}
+	}
+	err = p.authAndPersistOutliers(ctx, ev.RoomID, auth)
+	var re *pdu.RaiseError
+	if err != nil && !errors.Is(err, errUncertain) && errors.As(err, &re) {
+		p.log.Warn().Err(err).Str("event_id", ev.ID).Msg("Failed to get auth chain")
+		return nil
+	}
+	if err != nil && !errors.Is(err, errUncertain) {
+		return fmt.Errorf("%w: auth chain: %v", errUncertain, err)
+	}
+	return err
 }
 
 // stateAcrossMissingPrevs is the missing-prevs half of

@@ -1,6 +1,6 @@
 // Package fedfetch pulls events from remote servers for write mode, as
 // Synapse's FederationClient does (federation/federation_client.py):
-// /get_missing_events, /state_ids, /event and /state, each pulled PDU
+// /get_missing_events, /state_ids, /event, /state and /event_auth, each pulled PDU
 // checked like _check_sigs_and_hash_for_pulled_events_and_fetch checks it.
 //
 // Where Synapse's handling depends on what we do not reproduce -- a key it
@@ -244,6 +244,29 @@ func (c *Client) State(ctx context.Context, dest, roomID, eventID string, rv *pd
 		}
 	}
 	return auth, state, nil
+}
+
+// EventAuth is get_event_auth: the auth chain of eventID, checked as
+// _check_sigs_and_hash_for_pulled_events_and_fetch checks it.
+func (c *Client) EventAuth(ctx context.Context, dest, roomID, eventID string, rv *pdu.RoomVersion) ([]*Pulled, error) {
+	var resp struct {
+		AuthChain []json.RawMessage `json:"auth_chain"`
+	}
+	// get_event_auth: no timeout.
+	if err := c.do(ctx, 0, dest, http.MethodGet, []any{"v1", "event_auth", roomID, eventID}, nil, nil, &resp); err != nil {
+		return nil, err
+	}
+	var out []*Pulled
+	for _, raw := range resp.AuthChain {
+		p, err := c.check(ctx, raw, rv, roomID, dest, batch)
+		if err != nil {
+			return nil, err
+		}
+		if p != nil {
+			out = append(out, p)
+		}
+	}
+	return out, nil
 }
 
 // check is event_from_pdu_json, then _check_sigs_and_hash_and_fetch_one for

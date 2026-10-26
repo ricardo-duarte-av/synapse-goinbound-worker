@@ -196,8 +196,10 @@ func (s *Store) GetEvents(ctx context.Context, ids []string) (map[string]*pdu.Ev
 		return nil, err
 	}
 	if len(bad) > 0 {
+		// Our parser refusing a stored event is not Synapse raising: it
+		// may well load it.
 		for id, e := range bad {
-			return nil, &pdu.RaiseError{Msg: fmt.Sprintf("event %s: %v", id, e)}
+			return nil, fmt.Errorf("pdustore: stored event %s: %v", id, e)
 		}
 	}
 	out := make(map[string]*pdu.Event, len(got))

@@ -191,10 +191,12 @@ type Decision struct {
 	//
 	// Ignore: Synapse ignores the event (already seen, not in the room).
 	// Drop: Synapse fails it and persists nothing (FederationError).
-	// Raise: Synapse's event auth raises something other than an AuthError
-	// (a SynapseError, KeyError, ValueError). compute_event_context has
-	// stored the event's state groups by then (Entry, Bump), and nothing
-	// else is persisted: "Failed to handle PDU".
+	// Raise: Synapse raises something other than an AuthError (a
+	// SynapseError, KeyError, ValueError) while handling the event: in
+	// state resolution, after bumping the groups (Bump, no Entry); in auth,
+	// soft-fail or push, after compute_event_context stored the event's
+	// state groups (Entry, Bump). Nothing else is persisted: "Failed to
+	// handle PDU".
 	// Defer: write mode does not do this exactly as Synapse would, so the
 	// event stays staged for Synapse's own inbound worker.
 	Ignore, Drop, Raise, Defer string
@@ -227,6 +229,11 @@ type Decision struct {
 	// pushSkipped says Synapse computes no rows (min depth).
 	pushSkipped bool
 }
+
+// DeferMissingAuth is a decision deferred for auth events we do not hold.
+// Entry, Before and Bump are filled in: the state groups Synapse stores
+// before it looks for them.
+const DeferMissingAuth = "missing auth events"
 
 // Decide works out how Synapse would handle a staged event, up to but not
 // including its writes.
@@ -324,7 +331,7 @@ func (s *Verifier) Decide(ctx context.Context, in DecideInput) (*Decision, error
 	// given (state_ids_before_event: stored in full, nothing bumped).
 	if in.StateBefore != nil {
 		d.Entry, d.Before = &StateEntry{state: in.StateBefore}, in.StateBefore
-	} else if why, err := s.resolveForEvent(ctx, in, ev, d); err != nil || why != "" {
+	} else if why, err := s.resolveForEvent(ctx, in, ev, d); err != nil || why != "" || d.Raise != "" {
 		if err != nil {
 			return nil, err
 		}
@@ -342,8 +349,9 @@ func (s *Verifier) Decide(ctx context.Context, in DecideInput) (*Decision, error
 	rej, why, err := s.checkEventAuth(ctx, ev, d.Before)
 	if err != nil {
 		if errors.Is(err, ErrMissingAuth) {
-			// Synapse fetches them from the origin; we don't yet.
-			d.Defer = "auth: " + err.Error()
+			// Synapse fetches them from the origin, which the processor
+			// does (or leaves to Synapse), then decides again.
+			d.Defer = DeferMissingAuth
 			return d, nil
 		}
 		var re *pdu.RaiseError
@@ -379,7 +387,7 @@ func (s *Verifier) Decide(ctx context.Context, in DecideInput) (*Decision, error
 		if err != nil {
 			var re *pdu.RaiseError
 			if errors.As(err, &re) {
-				d.Defer = "soft fail: " + err.Error()
+				d.Raise = "soft fail: " + err.Error()
 				return d, nil
 			}
 			return nil, err
@@ -390,7 +398,7 @@ func (s *Verifier) Decide(ctx context.Context, in DecideInput) (*Decision, error
 		if err != nil {
 			var re *pdu.RaiseError
 			if errors.As(err, &re) {
-				d.Defer = "soft fail: " + err.Error()
+				d.Raise = "soft fail: " + err.Error()
 				return d, nil
 			}
 			return nil, err
@@ -431,7 +439,7 @@ func (s *Verifier) Decide(ctx context.Context, in DecideInput) (*Decision, error
 		if err != nil {
 			return nil, err
 		}
-		if why != "" {
+		if why != "" || d.Raise != "" {
 			d.Defer = why
 			return d, nil
 		}
@@ -521,12 +529,16 @@ func (s *Verifier) resolveForEvent(ctx context.Context, in DecideInput, ev *pdu.
 	}
 	before, err := stateres.ResolveWith(ctx, ev.RoomID, ev.Room, sets, s.st, s.opts)
 	if errors.Is(err, stateres.ErrUnsupported) {
-		return "state resolution v1", nil
+		return "state resolution not ported", nil
 	}
 	if err != nil {
 		var re *pdu.RaiseError
 		if errors.As(err, &re) {
-			return "state resolution: " + err.Error(), nil
+			// resolve_state_groups bumped every group, then raised:
+			// nothing cached, no group stored.
+			d.Bump = [][]int64{slices.Clone(groups)}
+			d.Raise = "state resolution: " + err.Error()
+			return "", nil
 		}
 		return "", err
 	}
@@ -591,16 +603,18 @@ func (s *Verifier) decidePush(ctx context.Context, ev *pdu.Event, d *Decision, s
 		d.pushSkipped = true
 		return nil, "", nil
 	}
-	if d.SoftFailed {
-		// filter_event_for_clients_with_state shows it to nobody.
-		d.pushRows = map[string]pushRow{}
-		return nil, "", nil
-	}
 	rows, err := s.pushRows(ctx, ev, d.Before, snap)
+	if err == nil && d.SoftFailed {
+		// filter_event_for_clients_with_state shows it to nobody; the
+		// rules ran first, and could raise.
+		rows = map[string]pushRow{}
+	}
 	if err != nil {
 		var re *pdu.RaiseError
 		if errors.As(err, &re) {
-			return nil, "push: " + err.Error(), nil
+			// action_for_events_by_user raises before staging anything.
+			d.Raise = "push: " + err.Error()
+			return nil, "", nil
 		}
 		return nil, "", err
 	}
@@ -931,9 +945,6 @@ func (s *Verifier) softFailedWithGap(ctx context.Context, ev *pdu.Event, snap *p
 	sets = append(sets, before)
 	current, err := stateres.ResolveWith(ctx, ev.RoomID, ev.Room, sets, s.st, s.opts)
 	if err != nil {
-		if errors.Is(err, stateres.ErrUnsupported) {
-			return false, &pdu.RaiseError{Msg: "state resolution v1"}
-		}
 		return false, err
 	}
 	types, err := pdu.AuthTypesForEvent(ev.Room, ev)
