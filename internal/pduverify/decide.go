@@ -220,8 +220,11 @@ type Decision struct {
 	// groups are stored (check_state_groups_and_bump_deletion), in order.
 	Bump [][]int64
 
-	Rejected   string
-	SoftFailed bool
+	Rejected string
+	// RejectedWhy is the auth failure behind Rejected, for the log line
+	// Synapse writes ("While checking auth of %r ...").
+	RejectedWhy string
+	SoftFailed  bool
 	// Metadata is the event's internal metadata to persist.
 	Metadata map[string]any
 	// Replaces is unsigned.replaces_state.
@@ -373,7 +376,7 @@ func (s *Verifier) Decide(ctx context.Context, in DecideInput) (*Decision, error
 		return nil, err
 	}
 	if rej {
-		d.Rejected = RejectedAuthError
+		d.Rejected, d.RejectedWhy = RejectedAuthError, why
 		if strings.HasPrefix(why, "oversized") {
 			d.Rejected = RejectedOversized
 		}

@@ -526,6 +526,7 @@ decided:
 	handleTime.Observe(time.Since(start).Seconds())
 	switch {
 	case d.Rejected != "":
+		log.Warn().Str("reason", d.RejectedWhy).Bool("partial_state", d.PartialState).Msg("Rejected: failed auth")
 		handled.WithLabelValues("rejected").Inc()
 	case d.SoftFailed:
 		handled.WithLabelValues("soft_failed").Inc()

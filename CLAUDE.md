@@ -224,6 +224,16 @@ things that are not derivable from the code.
   contacting policy servers at any time (2026-10-15). About 8% of PDUs in
   policy rooms make Synapse ask (~45/hour).
 
+- **A partial-state resync rewrites what was decided on partial state**
+  (`update_state_for_partial_state_event`, `state.py:793`). Main gives each
+  such event a new state group and flips its rejection status, so rejections
+  made while partial vanish on resync (5 → 0 on a 2026-10-26 join). The
+  shadow skips such decisions ("partial state, resynced since"). Rejections
+  are logged ("Rejected: failed auth"), as Synapse warns, since afterwards
+  the database no longer shows them. A join also brings a burst of outliers
+  (~28k for a 20k-state room), from main's resync and from our missing-prevs
+  path racing it, as Python's would.
+
 - **homeserver.yaml has duplicate keys** (`msc3814_enabled` twice).
   PyYAML keeps the last one; yaml.v3 refuses the whole file, so
   `experimental_features` is decoded by hand (`lastWins`).

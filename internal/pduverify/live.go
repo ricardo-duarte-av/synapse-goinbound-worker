@@ -503,6 +503,19 @@ func (l *Live) check(j *job) {
 		if j.decideErr != "" {
 			return &Result{EventID: id, Outcome: OutcomeSkipped, Reason: j.decideErr}
 		}
+		if j.decision != nil && j.decision.PartialState {
+			// Decided on partial state. Once the room is resynced, Synapse
+			// has recomputed the event's state group and rejection
+			// (update_state_for_partial_state_event), or processed it again
+			// on full state: what is stored is no longer this decision's.
+			still, err := l.v.st.AnyPartialState(ctx, []string{id})
+			if err != nil {
+				return &Result{EventID: id, Outcome: OutcomeError, Reason: err.Error()}
+			}
+			if !still {
+				return &Result{EventID: id, Outcome: OutcomeSkipped, Reason: "partial state, resynced since"}
+			}
+		}
 		staged := j.staged
 		if answer != nil && j.decision != nil && !j.redacted {
 			if answer.Sigs == nil {
@@ -660,7 +673,7 @@ var reasonLabels = []string{
 	"stored in full: prevs may have been missing", "group before", "group after",
 	"outlier", "create event", "prev event without state group", "a prev's state was computed after the event's",
 	"no state group for the event", "state resolution v1", "signing key not held", "signing key replaced",
-	"rejected", "partial state room", "snapshot taken after the event", "backfilled", "missing prevs", "race",
+	"rejected", "partial state room", "partial state, resynced since", "snapshot taken after the event", "backfilled", "missing prevs", "race",
 	"no snapshot", "soft fail",
 	"state_groups did not match", "soft_fail did not match", "no hashes", "redacted on receipt",
 	"event_from_pdu_json", "policy server soft-failed it", "send body", "local event",

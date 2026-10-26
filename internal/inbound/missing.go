@@ -324,6 +324,10 @@ func (p *Processor) processPulled(ctx context.Context, origin string, rv *pdu.Ro
 		return fmt.Errorf("%w: persisting pulled %s: %v", errUncertain, pe.ID, err)
 	}
 	pulledEvents.Inc()
+	if d.Rejected != "" {
+		p.log.Warn().Str("event_id", pe.ID).Str("room_id", pe.Event.RoomID).Str("reason", d.RejectedWhy).
+			Bool("partial_state", d.PartialState).Msg("Rejected: failed auth")
+	}
 	p.after.Pulled(pe.ID, stateBefore != nil)
 	if d.ResyncDevices != "" && d.Rejected == "" {
 		p.resync(d.ResyncDevices)
