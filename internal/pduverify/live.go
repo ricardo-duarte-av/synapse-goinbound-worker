@@ -730,7 +730,7 @@ func (l *Live) decideNotPersisted(ctx context.Context, j *job, log zerolog.Logge
 				Msg("PDU shadow: write mode would defer a PDU Synapse did not persist")
 		}
 		return
-	case d.Ignore != "" || d.Drop != "":
+	case d.Ignore != "" || d.Drop != "" || d.Raise != "":
 		l.record("decide", OutcomeMatch, "not persisted")
 		return
 	}

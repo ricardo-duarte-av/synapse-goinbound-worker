@@ -118,6 +118,15 @@ event must end up persisted exactly once, with nothing left staged.
   as far as Synapse's every time (held keys, notaries, the server), as
   Synapse does, with no delay after a failed lookup. With more than one key
   ID (Synapse lists them in set order), it is still left to Synapse.
+- Event auth that raises (a `SynapseError`, `KeyError`, `ValueError`; for
+  example `$oBePoe…`, power levels with a string notification level, in
+  `!bdbbTYhctZTWzoTzn9:federated.nexus`, 2026-10-22) is handled as Synapse
+  handles it: a received event fails ("Failed to handle PDU", outcome
+  `failed`) after its state groups are stored; a pulled prev that raises
+  fails the received event too; an outlier that raises behind missing prevs
+  records "ERROR 403: We can't get valid state history." for the pulled
+  event. Raises elsewhere (state resolution, soft-fail, push) are still
+  deferred.
 - Remote fetches retry as Synapse's federation client does: `/state_ids`,
   `/state` and `/event` for missing state, which Synapse requests without a
   timeout, get 60s an attempt and up to 3 retries on no response, a 5xx or a

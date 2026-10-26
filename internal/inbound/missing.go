@@ -26,6 +26,11 @@ import (
 
 var errUncertain = errors.New("inbound: missing events path not reproducible")
 
+// errFailed is a pulled event whose auth raised, as Synapse's would: the
+// exception escapes _get_missing_events_for_pdu, and the event that pulled
+// it fails too.
+var errFailed = errors.New("inbound: a pulled event failed")
+
 // Fetching pulls events from remote servers.
 type Fetching interface {
 	MissingEvents(ctx context.Context, origin, roomID string, rv *pdu.RoomVersion, earliest, latest []string, limit, minDepth int) ([]*fedfetch.Pulled, error)
@@ -256,6 +261,14 @@ func (p *Processor) processPulledEvent(ctx context.Context, origin string, rv *p
 		return err
 	case d.Defer != "":
 		return fmt.Errorf("%w: pulled %s: %s", errUncertain, pe.ID, d.Defer)
+	case d.Raise != "":
+		// Not the FederationError _process_pulled_event catches: it
+		// escapes, ending the batch and failing the event that pulled it.
+		// Nothing is recorded; the state groups were stored.
+		if _, _, err := p.storeGroups(ctx, room, pe.ID, d); err != nil {
+			return fmt.Errorf("%w: storing state groups for pulled %s: %v", errUncertain, pe.ID, err)
+		}
+		return fmt.Errorf("%w: pulled %s: %s", errFailed, pe.ID, d.Raise)
 	case d.Ignore != "" || d.Drop != "":
 		return nil
 	}
@@ -518,7 +531,9 @@ func (p *Processor) authAndPersistOutliers(ctx context.Context, room string, pul
 		e := byID[id]
 		rej, drop, err := pduverify.OutlierVerdict(e.Event, authMap)
 		if err != nil {
-			return fmt.Errorf("%w: outlier %s: %v", errUncertain, id, err)
+			// The batch fails, nothing of it persisted. For missing prevs
+			// that is "We can't get valid state history."
+			return fmt.Errorf("outlier %s: %w", id, err)
 		}
 		if drop {
 			p.log.Warn().Str("event_id", id).Msg("Dropping event which relies on an auth_event which could not be found")

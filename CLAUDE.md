@@ -113,7 +113,14 @@ things that are not derivable from the code.
   a `KeyError` or a `ValueError` from `int()` escapes `except AuthError`. In
   the receive path the event then fails rather than being rejected. In
   state resolution the whole resolution fails. Never count one as a
-  rejection.
+  rejection. Where it escapes decides what was written (write mode,
+  `Decision.Raise`): a received or pulled event's state groups are stored
+  first (`compute_event_context` runs before auth), then nothing else; a
+  pulled prev's raise also fails the event that pulled it, recording no
+  failed pull; an outlier's raise, behind missing prevs, is caught as
+  "We can't get valid state history." and recorded for the pulled event.
+  Our "missing auth events" is not one of them (`ErrMissingAuth`): Synapse
+  fetches those.
 - **v12 `auth_event_ids()` appends the create event**
   (`rust/src/events/formats/v4.rs`). `ParseEvent` does the same. Without it,
   every v12 event fails "no create event in auth events".

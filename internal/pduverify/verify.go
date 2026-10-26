@@ -218,6 +218,10 @@ func (r *Result) fail(outcome, reason string) *Result {
 	return r
 }
 
+// ErrMissingAuth is checkEventAuth's error for auth events we do not hold,
+// which Synapse fetches from the origin. It is not one of Synapse's raises.
+var ErrMissingAuth = &pdu.RaiseError{Msg: "missing auth events"}
+
 // checkEventAuth reproduces FederationEventHandler._check_event_auth
 // (federation_event.py:1830) for a fully stated room: rejected or not, and why.
 // validate_event_for_room_version comes first: the field size limits, then
@@ -241,7 +245,7 @@ func (s *Verifier) checkEventAuth(ctx context.Context, ev *pdu.Event, before pdu
 	if len(claimed) != len(uniq(ev.AuthEvents)) {
 		// _load_or_fetch_auth_events_for_event would have fetched them
 		// from the origin; we cannot follow that.
-		return false, "", &pdu.RaiseError{Msg: "missing auth events"}
+		return false, "", ErrMissingAuth
 	}
 	if err := pdu.CheckStateIndependentAuthRules(ev, claimed); err != nil {
 		if pdu.IsAuthError(err) {

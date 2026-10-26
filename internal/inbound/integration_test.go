@@ -144,6 +144,22 @@ func TestWriteModeFetchesMissingPrevs(t *testing.T) {
 	// The pulled prev's own prev is missing: its state comes from the
 	// origin's /state_ids and /state, the prev from /event as an outlier.
 	t.Run("gap behind the prev", func(t *testing.T) { runMissingPrevs(t, true, true) })
+	// The pulled prev is power levels with a string notification level, as
+	// $oBePoe… in !bdbbTYhctZTWzoTzn9:federated.nexus: its auth raises a
+	// SynapseError, which fails M3 as well. Nothing is persisted or
+	// recorded; M2's state group is stored.
+	t.Run("pulled prev raises", func(t *testing.T) {
+		raiseAt = "pulled"
+		defer func() { raiseAt = "" }()
+		runMissingPrevs(t, true, false)
+	})
+	// The same event, as the outlier behind M2: "We can't get valid state
+	// history." recorded for M2, and M3 dropped, its prev still missing.
+	t.Run("outlier raises", func(t *testing.T) {
+		raiseAt = "outlier"
+		defer func() { raiseAt = "" }()
+		runMissingPrevs(t, true, true)
+	})
 	// Through the front door, beside a PDU with a forged signature.
 	t.Run("front door", func(t *testing.T) {
 		frontDoor = true
@@ -153,6 +169,10 @@ func TestWriteModeFetchesMissingPrevs(t *testing.T) {
 }
 
 var frontDoor bool
+
+// raiseAt makes the pulled prev ("pulled") or the outlier behind it
+// ("outlier") a power levels event whose auth raises.
+var raiseAt string
 
 func runMissingPrevs(t *testing.T, originHasIt, gap bool) {
 	ctx := context.Background()
@@ -179,17 +199,26 @@ func runMissingPrevs(t *testing.T, originHasIt, gap bool) {
 	empty, aliceKey, bobKey := "", alice, bob
 	createID, create := ev(local, "m.room.create", alice, &empty, map[string]any{"creator": alice, "room_version": "10"}, 1, []string{}, []string{})
 	aJoinID, aJoin := ev(local, "m.room.member", alice, &aliceKey, map[string]any{"membership": "join"}, 2, []string{createID}, []string{createID})
-	plID, pl := ev(local, "m.room.power_levels", alice, &empty, map[string]any{"users": map[string]any{alice: 100}}, 3, []string{aJoinID}, []string{createID, aJoinID})
+	plID, pl := ev(local, "m.room.power_levels", alice, &empty, map[string]any{"users": map[string]any{alice: 100, bob: 100}}, 3, []string{aJoinID}, []string{createID, aJoinID})
 	jrID, jr := ev(local, "m.room.join_rules", alice, &empty, map[string]any{"join_rule": "public"}, 4, []string{plID}, []string{createID, aJoinID, plID})
 	bJoinID, bJoin := ev(remote, "m.room.member", bob, &bobKey, map[string]any{"membership": "join"}, 5, []string{jrID}, []string{createID, plID, jrID})
 	m1ID, m1 := ev(remote, "m.room.message", bob, nil, map[string]any{"msgtype": "m.text", "body": "one"}, 6, []string{bJoinID}, []string{createID, plID, bJoinID})
 	// With a gap, M2's prev is X, which nobody sends us but /event.
 	m2Prev := m1ID
-	xID, x := ev(remote, "m.room.message", bob, nil, map[string]any{"msgtype": "m.text", "body": "x"}, 7, []string{m1ID}, []string{createID, plID, bJoinID})
+	badPL := map[string]any{"users": map[string]any{alice: 100, bob: 100}, "notifications": map[string]any{"room": "50"}}
+	xType, xKey, xContent := "m.room.message", (*string)(nil), map[string]any{"msgtype": "m.text", "body": "x"}
+	if raiseAt == "outlier" {
+		xType, xKey, xContent = "m.room.power_levels", &empty, badPL
+	}
+	xID, x := ev(remote, xType, bob, xKey, xContent, 7, []string{m1ID}, []string{createID, plID, bJoinID})
 	if gap {
 		m2Prev = xID
 	}
-	m2ID, m2 := ev(remote, "m.room.message", bob, nil, map[string]any{"msgtype": "m.text", "body": "two"}, 8, []string{m2Prev}, []string{createID, plID, bJoinID})
+	m2Type, m2Key, m2Content := "m.room.message", (*string)(nil), map[string]any{"msgtype": "m.text", "body": "two"}
+	if raiseAt == "pulled" {
+		m2Type, m2Key, m2Content = "m.room.power_levels", &empty, badPL
+	}
+	m2ID, m2 := ev(remote, m2Type, bob, m2Key, m2Content, 8, []string{m2Prev}, []string{createID, plID, bJoinID})
 	m3ID, m3 := ev(remote, "m.room.message", bob, nil, map[string]any{"msgtype": "m.text", "body": "three"}, 9, []string{m2ID}, []string{createID, plID, bJoinID})
 
 	// The room as Synapse holds it once M1 is persisted.
@@ -322,6 +351,47 @@ func runMissingPrevs(t *testing.T, originHasIt, gap bool) {
 		if err := p.Received(ctx, "remote.test", room, m3ID, staged, []byte(`{}`)); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if raiseAt != "" {
+		waitFor(t, "M3 unstaged", func() bool { s, _ := d.NextStaged(ctx, room); return s == nil })
+		per.mu.Lock()
+		defer per.mu.Unlock()
+		if len(per.sent) != 0 {
+			t.Errorf("persisted %v; Synapse persists nothing when auth raises", per.order)
+		}
+		if p.isDeferred(room) {
+			t.Error("deferred")
+		}
+		var causes []string
+		rows, err := c.Query(ctx, `SELECT event_id || ' ' || last_cause FROM event_failed_pull_attempts WHERE room_id = $1`, room)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for rows.Next() {
+			var r string
+			rows.Scan(&r)
+			causes = append(causes, r)
+		}
+		rows.Close()
+		var groups int
+		c.QueryRow(ctx, `SELECT count(*) FROM state_groups WHERE event_id = $1`, m2ID).Scan(&groups)
+		switch raiseAt {
+		case "pulled":
+			if len(causes) != 0 {
+				t.Errorf("failed pulls %v; the exception escapes before any is recorded", causes)
+			}
+			if groups != 1 {
+				t.Errorf("%d state groups for M2, want its group after", groups)
+			}
+		case "outlier":
+			if want := m2ID + " ERROR 403: We can't get valid state history."; len(causes) != 1 || causes[0] != want {
+				t.Errorf("failed pulls %v, want [%s]", causes, want)
+			}
+			if groups != 0 {
+				t.Errorf("%d state groups for M2; its context was never computed", groups)
+			}
+		}
+		return
 	}
 	if !originHasIt {
 		waitFor(t, "M3 dropped", func() bool { s, _ := d.NextStaged(ctx, room); return s == nil })

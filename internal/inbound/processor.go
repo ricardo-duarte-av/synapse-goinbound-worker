@@ -3,6 +3,7 @@ package inbound
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"sync"
@@ -420,6 +421,12 @@ func (p *Processor) handle(ctx context.Context, room string, rv *pdu.RoomVersion
 	if err == nil && d.Defer == "missing prevs" && p.missing != nil {
 		drop, still, merr := p.missingPrevs(ctx, s.Origin, rv, d.Event)
 		switch {
+		case errors.Is(merr, errFailed):
+			// A pulled prev raised: on_receive_pdu's "Error fetching
+			// missing prev_events", and this event fails with it.
+			log.Error().Err(merr).Msg("Failed to handle PDU")
+			handled.WithLabelValues("failed").Inc()
+			return outcomeDone
 		case merr != nil:
 			log.Info().Err(merr).Msg("Write mode: leaving an event with missing prevs to Synapse")
 			handled.WithLabelValues("deferred").Inc()
@@ -452,6 +459,17 @@ func (p *Processor) handle(ctx context.Context, room string, rv *pdu.RoomVersion
 		log.Warn().Str("why", d.Drop).Msg("Error handling PDU")
 		handled.WithLabelValues("dropped").Inc()
 		return outcomeDone
+	case d.Raise != "":
+		// Any other exception: logged, the event not persisted, but its
+		// state groups were stored before auth ran.
+		if _, _, err := p.storeGroups(ctx, room, s.EventID, d); err != nil {
+			log.Warn().Err(err).Msg("Write mode: storing state groups failed; leaving the event to Synapse")
+			handled.WithLabelValues("error").Inc()
+			return outcomeDefer
+		}
+		log.Error().Str("why", d.Raise).Msg("Failed to handle PDU")
+		handled.WithLabelValues("failed").Inc()
+		return outcomeDone
 	}
 
 	if err := p.write(ctx, room, s, d); err != nil {
@@ -478,35 +496,9 @@ func (p *Processor) handle(ctx context.Context, room string, rv *pdu.RoomVersion
 // persister: calculate_context_info, UnpersistedEventContext.persist,
 // _run_push_actions_and_persist_event.
 func (p *Processor) write(ctx context.Context, room string, s *Staged, d *pduverify.Decision) error {
-	for _, groups := range d.Bump {
-		missing, err := p.db.BumpDeletion(ctx, groups)
-		if err != nil {
-			return err
-		}
-		if len(missing) > 0 {
-			p.cache.Pop(d.Groups)
-			return fmt.Errorf("%w: %v", ErrMissingGroup, missing)
-		}
-	}
-	load := func(g int64) (pdu.StateMap, error) { return p.read.StateForGroup(ctx, g) }
-
-	before := d.Entry.Group()
-	if before == 0 {
-		prev, delta := d.Entry.PrevGroup()
-		g, err := p.db.StoreStateGroup(ctx, s.EventID, room, prev, delta, d.Entry.State(), load)
-		if err != nil {
-			return err
-		}
-		d.Entry.SetGroup(g)
-		before = g
-	}
-	after := before
-	if d.Event.IsState() {
-		g, err := p.db.StoreStateGroup(ctx, s.EventID, room, before, pdu.StateMap{d.Event.Key(): d.Event.ID}, nil, load)
-		if err != nil {
-			return err
-		}
-		after = g
+	before, after, err := p.storeGroups(ctx, room, s.EventID, d)
+	if err != nil {
+		return err
 	}
 
 	rows := make([]PushRow, len(d.Push))
@@ -528,6 +520,42 @@ func (p *Processor) write(ctx context.Context, room string, s *Staged, d *pduver
 		return err
 	}
 	return nil
+}
+
+// storeGroups is compute_event_context's writes: the deletion bumps, then
+// the state groups before and after the event.
+func (p *Processor) storeGroups(ctx context.Context, room, eventID string, d *pduverify.Decision) (before, after int64, err error) {
+	for _, groups := range d.Bump {
+		missing, err := p.db.BumpDeletion(ctx, groups)
+		if err != nil {
+			return 0, 0, err
+		}
+		if len(missing) > 0 {
+			p.cache.Pop(d.Groups)
+			return 0, 0, fmt.Errorf("%w: %v", ErrMissingGroup, missing)
+		}
+	}
+	load := func(g int64) (pdu.StateMap, error) { return p.read.StateForGroup(ctx, g) }
+
+	before = d.Entry.Group()
+	if before == 0 {
+		prev, delta := d.Entry.PrevGroup()
+		g, err := p.db.StoreStateGroup(ctx, eventID, room, prev, delta, d.Entry.State(), load)
+		if err != nil {
+			return 0, 0, err
+		}
+		d.Entry.SetGroup(g)
+		before = g
+	}
+	after = before
+	if d.Event.IsState() {
+		g, err := p.db.StoreStateGroup(ctx, eventID, room, before, pdu.StateMap{d.Event.Key(): d.Event.ID}, nil, load)
+		if err != nil {
+			return 0, 0, err
+		}
+		after = g
+	}
+	return before, after, nil
 }
 
 var (

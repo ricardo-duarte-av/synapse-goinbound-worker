@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
+	"github.com/tidwall/gjson"
 
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pdu"
 	"github.com/ricardo-duarte-av/synapse-goinbound-worker/internal/pduverify"
@@ -40,6 +41,9 @@ func (f *fakeDecide) Decide(_ context.Context, in pduverify.DecideInput) (*pduve
 		d.Defer = "test"
 	case "ignore":
 		d.Ignore = "test"
+	case "raise":
+		d.Raise = "test"
+		d.Entry = pduverify.NewEntry(0, f.base, pdu.StateMap{{Type: "m.room.topic"}: "$t"}, nil)
 	default:
 		d.Entry = pduverify.NewEntry(0, f.base, pdu.StateMap{{Type: "m.room.topic"}: "$t"}, nil)
 		d.Push = []pduverify.PushRow{{UserID: "@u:x", Notif: true}}
@@ -144,6 +148,43 @@ func TestProcessorDrainsInOrder(t *testing.T) {
 	c.QueryRow(ctx, `SELECT count(*) FROM event_push_actions_staging`).Scan(&n)
 	if n != 2 {
 		t.Errorf("%d push rows staged", n)
+	}
+}
+
+// An event whose auth raises is Synapse's "Failed to handle PDU": its state
+// group is stored (compute_event_context ran first), nothing is persisted,
+// it is unstaged, and the room's queue goes on.
+func TestProcessorFailsAnEventWhoseAuthRaises(t *testing.T) {
+	ctx := context.Background()
+	d := testDB(t, "goinbound-test")
+	base, _ := d.StoreStateGroup(ctx, "$create", "!r:x", 0, nil, pdu.StateMap{{Type: "m.room.create"}: "$create"}, nil)
+	dec, per := &fakeDecide{base: base}, &fakePersist{}
+	p := NewProcessor(d, dec, per, fakeRead{}, "x", zerolog.Nop())
+	defer p.Close()
+	if err := d.Stage(ctx, "y", "!r:x", "$1", v1Event("$1", "raise", 1), []byte(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Received(ctx, "y", "!r:x", "$2", v1Event("$2", "", 2), []byte(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "queue empty", func() bool { s, _ := d.NextStaged(ctx, "!r:x"); return s == nil })
+	per.mu.Lock()
+	if len(per.sent) != 1 || gjson.GetBytes(per.sent[0], "event.event_id").Str != "$2" {
+		t.Errorf("persisted %d entries, want only $2", len(per.sent))
+	}
+	per.mu.Unlock()
+	if p.isDeferred("!r:x") {
+		t.Error("deferred")
+	}
+	c := adminConn(t)
+	var n int
+	c.QueryRow(ctx, `SELECT count(*) FROM state_groups WHERE event_id = '$1'`).Scan(&n)
+	if n != 1 {
+		t.Errorf("%d state groups stored for the failed event, want 1", n)
+	}
+	c.QueryRow(ctx, `SELECT count(*) FROM event_push_actions_staging WHERE event_id = '$1'`).Scan(&n)
+	if n != 0 {
+		t.Errorf("%d push rows staged for the failed event", n)
 	}
 }
 

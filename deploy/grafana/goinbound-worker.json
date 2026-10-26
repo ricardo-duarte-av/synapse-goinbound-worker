@@ -1992,7 +1992,7 @@
     {
       "type": "timeseries",
       "title": "Events handled by write mode",
-      "description": "Staged events by outcome: persisted, rejected and soft_failed (all three persisted); ignored and dropped (persisted by nobody, as Synapse does); deferred and error (left staged for Synapse's worker).",
+      "description": "Staged events by outcome: persisted, rejected and soft_failed (all three persisted); ignored, dropped and failed (persisted by nobody, as Synapse does; failed: auth raised, state groups stored); deferred and error (left staged for Synapse's worker).",
       "id": 34,
       "datasource": {
         "type": "prometheus",

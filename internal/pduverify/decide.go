@@ -186,14 +186,18 @@ type DecideInput struct {
 
 // Decision is what to do with a staged event.
 type Decision struct {
-	// Exactly one of Ignore, Drop and Defer is set, or none when the event
-	// is to be persisted.
+	// Exactly one of Ignore, Drop, Raise and Defer is set, or none when the
+	// event is to be persisted.
 	//
 	// Ignore: Synapse ignores the event (already seen, not in the room).
 	// Drop: Synapse fails it and persists nothing (FederationError).
+	// Raise: Synapse's event auth raises something other than an AuthError
+	// (a SynapseError, KeyError, ValueError). compute_event_context has
+	// stored the event's state groups by then (Entry, Bump), and nothing
+	// else is persisted: "Failed to handle PDU".
 	// Defer: write mode does not do this exactly as Synapse would, so the
 	// event stays staged for Synapse's own inbound worker.
-	Ignore, Drop, Defer string
+	Ignore, Drop, Raise, Defer string
 
 	Event *pdu.Event
 	// Groups are the prev events' distinct state groups, the cache key.
@@ -337,12 +341,16 @@ func (s *Verifier) Decide(ctx context.Context, in DecideInput) (*Decision, error
 	// _check_event_auth.
 	rej, why, err := s.checkEventAuth(ctx, ev, d.Before)
 	if err != nil {
+		if errors.Is(err, ErrMissingAuth) {
+			// Synapse fetches them from the origin; we don't yet.
+			d.Defer = "auth: " + err.Error()
+			return d, nil
+		}
 		var re *pdu.RaiseError
 		if errors.As(err, &re) {
-			// Missing auth events are fetched from the origin, and
-			// Synapse's other exceptions fail the event; neither is ours
-			// to decide yet.
-			d.Defer = "auth: " + err.Error()
+			// It escapes _process_received_pdu, after the context's
+			// state groups were stored.
+			d.Raise = "auth: " + err.Error()
 			return d, nil
 		}
 		return nil, err
@@ -635,13 +643,13 @@ func (s *Verifier) CheckDecision(ctx context.Context, id string, d *Decision, sn
 		return res.fail(OutcomeError, err.Error())
 	}
 	se := got[id]
-	if d.Ignore != "" || d.Drop != "" {
+	if d.Ignore != "" || d.Drop != "" || d.Raise != "" {
 		if se == nil {
 			res.Outcome, res.Reason = OutcomeMatch, "not persisted"
 			return res
 		}
 		res.Outcome, res.Reason = OutcomeMismatch, "decide"
-		res.StateDiff = []string{"we would not persist it (" + d.Ignore + d.Drop + "); Synapse did"}
+		res.StateDiff = []string{"we would not persist it (" + d.Ignore + d.Drop + d.Raise + "); Synapse did"}
 		return res
 	}
 	if se == nil {
