@@ -45,6 +45,7 @@ GRANT SELECT ON
     ignored_users,
     local_current_membership,
     partial_state_rooms,
+    partial_state_events,
     push_rules,
     push_rules_enable,
     receipts_linearized,
